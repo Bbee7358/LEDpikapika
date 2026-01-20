@@ -3,12 +3,12 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Round LED Boards Simulator (10 boards x 48 leds)</title>
+  <title>LED Board Simulator - Single File Clean Architecture</title>
   <style>
     html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: ui-sans-serif, system-ui; }
     #ui {
       position: fixed; top: 12px; left: 12px; z-index: 10;
-      width: 380px; max-width: calc(100vw - 24px);
+      width: 440px; max-width: calc(100vw - 24px);
       background: rgba(20, 28, 40, 0.92);
       border: 1px solid rgba(255,255,255,0.08);
       border-radius: 12px; padding: 12px;
@@ -32,7 +32,8 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 11px; line-height: 1.35;
     }
-    #ui .hint { font-size: 11px; opacity: .88; line-height: 1.55; }
+    #ui .hint { font-size: 11px; opacity: .92; line-height: 1.55; }
+    #ui .tag { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); }
     #toast {
       position: fixed; bottom: 12px; left: 12px; z-index: 20;
       background: rgba(20, 28, 40, 0.92); border: 1px solid rgba(255,255,255,0.08);
@@ -44,21 +45,21 @@
 </head>
 <body>
   <div id="ui">
-    <h1>Round LED Boards Simulator</h1>
+    <h1>LED Board Simulator (1-file / structured)</h1>
     <div class="hint">
-      ・基板クリック：選択（座標は中心 x_mm,y_mm）<br>
-      ・基板ドラッグ：移動（10mmスナップ / Altで無効）<br>
-      ・Shift+基板ドラッグ(左右)：回転（15°スナップ / Altで無効）<br>
-      ・空白ドラッグ：パン　・ホイール：ズーム<br>
-      ・空白左クリック：波紋を追加<br><br>
-      LED配置（48個）：<br>
-      直径18mm(0°開始,6) / 直径34mm(15°開始,12) / 直径92mm(0°開始,30)
+      <span class="tag">基板</span> クリックで選択 / ドラッグで移動（10mmスナップ, Altで無効） / Shift+ドラッグで回転（15°, Altで無効）<br>
+      <span class="tag">空白</span> 左クリックでイベント / ドラッグでパン / ホイールでズーム<br>
+      <span class="tag">Effect</span> 1 Ripple / 2 OrbitPulse / 3 SweepLine / 4 NoiseSparkle
+      <br><br>
+      LED番号規則：外周92mm 0..29(0° CCW) / 中34mm 30..41(15° CCW) / 内18mm 42..47(0° CCW)
+      <br>
+      <span class="tag">保存</span> 配置や設定は自動保存（localStorage）。次回起動で復元。
     </div>
 
     <div class="row">
       <button id="apply">Apply</button>
       <button id="export">Export</button>
-      <button id="clearRipples">Ripples Clear</button>
+      <button id="clearEvents">Events Clear</button>
     </div>
 
     <textarea id="config"></textarea>
@@ -68,493 +69,752 @@
       <button id="resetBoards">Reset Boards</button>
     </div>
 
-    <div class="hint">
-      ※次の段階で、このシミュの「480個RGB配列」をそのままUSBでPicoへ送れば、現実の点灯に接続できる。
-    </div>
+    <div class="hint" id="effectInfo"></div>
   </div>
 
   <div id="toast"></div>
 
-  <!-- p5.js (CDN) -->
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
-
   <script>
-    // =========================
-    // 1) Config
-    // =========================
+    // ============================================================
+    // 0) CONFIG (single source of truth)
+    // ============================================================
     const DEFAULT_CONFIG = {
-      world: { width_mm: 2400, height_mm: 1400 }, // 表示の目安（実寸に合わせて自由に変えてOK）
+      world: { width_mm: 2400, height_mm: 1400 },
       board: { diameter_mm: 100 },
-      ledRings: [
-        { diameter_mm: 18, count: 6,  start_deg: 0  },
-        { diameter_mm: 34, count: 12, start_deg: 15 },
-        { diameter_mm: 92, count: 30, start_deg: 0  },
-      ],
+
+      // LED index mapping (your numbering)
+      ledMapping: {
+        outer: { diameter_mm: 92, count: 30, start_deg: 0,  index_from: 0  },  // 0..29
+        mid:   { diameter_mm: 34, count: 12, start_deg: 15, index_from: 30 },  // 30..41
+        inner: { diameter_mm: 18, count: 6,  start_deg: 0,  index_from: 42 }   // 42..47
+      },
+
       boards: Array.from({length: 10}).map((_, i) => ({
         id: i,
-        // 円の中心座標 (mm)
         x_mm: 300 + (i%5)*220,
         y_mm: 280 + Math.floor(i/5)*320,
         rot_deg: 0
       })),
-      ripple: {
-        speed_mm_s: 650,     // 波の広がり速度
-        ring_width_mm: 55,   // 輪の太さ（大きいほどボヤける）
-        decay_s: 2.0         // 消える速さ（大きいほど長持ち）
-      },
+
       view: {
-        show_ring_guides: true // 基板内のリングガイド表示
+        show_ring_guides: true,
+        show_index_labels: false
+      },
+
+      effects: {
+        ripple: { speed_mm_s: 650, ring_width_mm: 55, decay_s: 2.0 },
+        orbitPulse: { angular_deg_s: 120, band_deg: 18, decay_s: 1.2 },
+        sweepLine: { period_s: 3.5, line_width_mm: 60, decay_s: 1.0 },
+        noiseSparkle: { density: 0.08, decay_s: 0.35 }
+      },
+
+      runtime: {
+        max_events: 30,
+        gamma: 1.8,
+        dot_base_px: 6
       }
     };
 
     let CFG = structuredClone(DEFAULT_CONFIG);
 
-    // =========================
-    // 2) Camera (pan / zoom)
-    // =========================
-    let cam = { x: 0, y: 0, zoom: 0.5 };
+    // ============================================================
+    // Persistence (localStorage)
+    // ============================================================
+    const STORAGE_KEY = "led_board_sim_cfg_v1";
 
-    function worldToScreen(wx, wy) {
-      return { x: wx * cam.zoom + cam.x, y: wy * cam.zoom + cam.y };
-    }
-    function screenToWorld(sx, sy) {
-      return { x: (sx - cam.x) / cam.zoom, y: (sy - cam.y) / cam.zoom };
-    }
-
-    // =========================
-    // 3) LED layout (ring-based)
-    // =========================
-    // 0° is to the right (+x), CCW positive.
-    // screen Y is down, but we treat world Y up by using y = -sin.
-    function polarToXY(radius_mm, deg) {
-      const th = deg * Math.PI / 180;
-      return { x: radius_mm * Math.cos(th), y: radius_mm * -Math.sin(th) };
-    }
-
-    // returns 48 points in board-local coordinates (mm), centered at (0,0)
-    function computeLedLocalPositions() {
-      const pts = [];
-      for (const ring of CFG.ledRings) {
-        const r = ring.diameter_mm / 2;
-        for (let i = 0; i < ring.count; i++) {
-          const deg = ring.start_deg + i * (360 / ring.count);
-          pts.push({ ...polarToXY(r, deg), ring });
-        }
+    function saveCFG(){
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(CFG));
+      } catch (e) {
+        console.warn("saveCFG failed:", e);
       }
-      // should be 48
-      return pts.slice(0, 48);
     }
 
-    function rot2d(x, y, rad) {
-      const cs = Math.cos(rad), sn = Math.sin(rad);
-      return { x: x*cs - y*sn, y: x*sn + y*cs };
-    }
+    function loadCFG(){
+      try {
+        const txt = localStorage.getItem(STORAGE_KEY);
+        if (!txt) return false;
 
-    // world LED positions: 10 boards * 48 = 480
-    function computeAllLedWorldPositions() {
-      const local = computeLedLocalPositions();
-      const out = [];
+        const parsed = JSON.parse(txt);
+        if (!parsed?.boards || parsed.boards.length !== 10) return false;
 
-      for (const b of CFG.boards) {
-        const rad = (b.rot_deg || 0) * Math.PI / 180;
-        const cx = b.x_mm, cy = b.y_mm; // board center in world
-
-        for (let i=0; i<48; i++) {
-          const p = local[i];
-          const rp = rot2d(p.x, p.y, rad);
-          out.push({
-            x: cx + rp.x,
-            y: cy + rp.y,
-            boardId: b.id,
-            ledInBoard: i
-          });
-        }
+        CFG = parsed;
+        return true;
+      } catch (e) {
+        console.warn("loadCFG failed:", e);
+        return false;
       }
-      return out;
     }
 
-    // =========================
-    // 4) Ripple effect
-    // =========================
-    let ripples = []; // {x,y,t0_ms}
+    // ============================================================
+    // 1) CORE UTILS (pure functions)
+    // ============================================================
+    const Util = {
+      clamp01(v){ return Math.max(0, Math.min(1, v)); },
+      polarToXY(radius_mm, deg){
+        const th = deg * Math.PI / 180;
+        // 0° right, CCW positive. Screen Y is down -> invert sin.
+        return { x: radius_mm * Math.cos(th), y: radius_mm * -Math.sin(th) };
+      },
+      rot2d(x, y, rad){
+        const cs = Math.cos(rad), sn = Math.sin(rad);
+        return { x: x*cs - y*sn, y: x*sn + y*cs };
+      },
+      hsvToRgb(h, s, v){
+        h = ((h % 360) + 360) % 360;
+        const c = v * s;
+        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+        const m = v - c;
+        let rp=0,gp=0,bp=0;
+        if (h < 60)      { rp=c; gp=x; bp=0; }
+        else if (h < 120){ rp=x; gp=c; bp=0; }
+        else if (h < 180){ rp=0; gp=c; bp=x; }
+        else if (h < 240){ rp=0; gp=x; bp=c; }
+        else if (h < 300){ rp=x; gp=0; bp=c; }
+        else             { rp=c; gp=0; bp=x; }
+        return { r: (rp+m), g: (gp+m), b: (bp+m) };
+      }
+    };
 
-    function addRipple(wx, wy) {
-      ripples.push({ x: wx, y: wy, t0_ms: performance.now() });
-      if (ripples.length > 20) ripples.shift();
+    // ============================================================
+    // 2) GEOMETRY (board & LED positions)
+    // ============================================================
+    const Geometry = {
+      // 48 points in board-local coords (center=0,0), index = LED number 0..47
+      ledLocalByIndex(){
+        const pts = new Array(48).fill(null);
+        const map = CFG.ledMapping;
+
+        const rings = [
+          { name: "outer", ...map.outer },
+          { name: "mid",   ...map.mid   },
+          { name: "inner", ...map.inner }
+        ];
+
+        for (const ring of rings) {
+          const r = ring.diameter_mm / 2;
+          for (let i=0; i<ring.count; i++){
+            const deg = ring.start_deg + i * (360 / ring.count);
+            const idx = ring.index_from + i;
+            pts[idx] = { ...Util.polarToXY(r, deg), ringName: ring.name, localDeg: deg };
+          }
+        }
+        for (let i=0; i<48; i++) if (!pts[i]) pts[i] = { x:0, y:0, ringName:"missing", localDeg:0 };
+        return pts;
+      },
+
+      // 480 LEDs in world coords: board0 idx0..47, board1 idx0..47, ...
+      ledWorld(){
+        const local = this.ledLocalByIndex();
+        const out = [];
+
+        for (const b of CFG.boards){
+          const rad = (b.rot_deg || 0) * Math.PI/180;
+
+          for (let idx=0; idx<48; idx++){
+            const p = local[idx];
+            const rp = Util.rot2d(p.x, p.y, rad);
+
+            // worldDeg: angle of LED around board center (0° right, CCW)
+            const worldDeg = (Math.atan2(-rp.y, rp.x) * 180 / Math.PI + 360) % 360;
+
+            out.push({
+              x: b.x_mm + rp.x,
+              y: b.y_mm + rp.y,
+              boardId: b.id,
+              ledIndex: idx,
+              ringName: p.ringName,
+              worldDeg
+            });
+          }
+        }
+        return out;
+      }
+    };
+
+    // ============================================================
+    // 3) EFFECTS (state machine)
+    // ============================================================
+    class BaseEffect {
+      constructor(id, name){ this.id=id; this.name=name; }
+      onEnter(){ }
+      onExit(){ }
+      onEvent(wx, wy){ }          // called on empty click
+      clear(){ }
+      intensity(led, nowMs){ return 0; } // 0..1
+      color(led, a){              // rgb in 0..1
+        const hue = 205 + (led.x + led.y) * 0.005;
+        return Util.hsvToRgb(hue, 0.85, a);
+      }
+      info(){ return ""; }
     }
 
-    function rippleIntensity(d, t_s) {
-      const v = CFG.ripple.speed_mm_s;
-      const r = v * t_s;
-      const w = CFG.ripple.ring_width_mm;
-      const decay = CFG.ripple.decay_s;
+    // shared events store
+    let events = []; // {x,y,t0_ms}
 
-      // gaussian around ring (d ~ r) + time decay
-      const ring = Math.exp(-((d - r)*(d - r)) / (2*w*w));
-      const life = Math.exp(-(t_s) / decay);
-      return ring * life;
-    }
-
-    // HSV -> RGB (0..1)
-    function hsvToRgb(h, s, v) {
-      h = ((h % 360) + 360) % 360;
-      const c = v * s;
-      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-      const m = v - c;
-      let rp=0,gp=0,bp=0;
-      if (h < 60)      { rp=c; gp=x; bp=0; }
-      else if (h < 120){ rp=x; gp=c; bp=0; }
-      else if (h < 180){ rp=0; gp=c; bp=x; }
-      else if (h < 240){ rp=0; gp=x; bp=c; }
-      else if (h < 300){ rp=x; gp=0; bp=c; }
-      else             { rp=c; gp=0; bp=x; }
-      return { r: (rp+m), g: (gp+m), b: (bp+m) };
-    }
-
-    // returns Uint8Array length 480*3
-    function computeFrameRGB(ledWorld) {
-      const now = performance.now();
-      const frame = new Uint8Array(480 * 3);
-
-      for (let i=0; i<ledWorld.length; i++) {
-        const p = ledWorld[i];
-
+    class RippleEffect extends BaseEffect {
+      constructor(){ super("ripple","Ripple"); }
+      onEvent(wx, wy){
+        events.push({ x: wx, y: wy, t0_ms: performance.now() });
+        while (events.length > CFG.runtime.max_events) events.shift();
+      }
+      clear(){ events = []; }
+      intensity(led, nowMs){
+        const cfg = CFG.effects.ripple;
         let a = 0;
-        for (const ev of ripples) {
-          const t_s = (now - ev.t0_ms) / 1000;
-          if (t_s < 0) continue;
-
-          const dx = p.x - ev.x;
-          const dy = p.y - ev.y;
-          const d = Math.hypot(dx, dy);
-
-          a += rippleIntensity(d, t_s);
+        for (const ev of events){
+          const t = (nowMs - ev.t0_ms)/1000;
+          if (t < 0) continue;
+          const d = Math.hypot(led.x - ev.x, led.y - ev.y);
+          const r = cfg.speed_mm_s * t;
+          const w = cfg.ring_width_mm;
+          const ring = Math.exp(-((d - r)*(d - r)) / (2*w*w));
+          const life = Math.exp(-t / cfg.decay_s);
+          a += ring * life;
         }
-
-        a = Math.min(1, a);
-
-        // 色は距離と座標で少しだけ変化（固定色にしたければ hue を固定すればOK）
-        const hue = 205 + (p.x * 0.01) + (p.y * 0.01);
-        const rgb = hsvToRgb(hue, 0.85, a);
-
-        // gamma-ish
-        const rr = Math.pow(rgb.r, 1.8);
-        const gg = Math.pow(rgb.g, 1.8);
-        const bb = Math.pow(rgb.b, 1.8);
-
-        frame[i*3+0] = Math.max(0, Math.min(255, Math.round(rr * 255)));
-        frame[i*3+1] = Math.max(0, Math.min(255, Math.round(gg * 255)));
-        frame[i*3+2] = Math.max(0, Math.min(255, Math.round(bb * 255)));
+        return Util.clamp01(a);
       }
-      return frame;
+      info(){ return "クリックで波紋中心追加。距離×時間で輪が広がる。"; }
     }
 
-    // =========================
-    // 5) Interaction: drag/rotate/pan/zoom
-    // =========================
-    let selectedBoardId = null;
-
-    // pan helpers
-    let dragging = false;
-    let dragPrev = { x:0, y:0 };
-
-    // drag mode: "none" | "pan" | "boardMove" | "boardRotate"
-    let dragMode = "none";
-    let dragStart = { sx:0, sy:0, wx:0, wy:0 };
-    let boardStart = { x:0, y:0, rot:0 };
-
-    const SNAP_MM = 10;
-
-    function snap(v) {
-      return Math.round(v / SNAP_MM) * SNAP_MM;
-    }
-
-    function isOnUI() {
-      const ui = document.getElementById('ui');
-      const rect = ui.getBoundingClientRect();
-      return (mouseX >= rect.left && mouseX <= rect.right && mouseY >= rect.top && mouseY <= rect.bottom);
-    }
-
-    function hitTestBoard(wx, wy) {
-      const radius = CFG.board.diameter_mm / 2;
-
-      // last to first for "topmost" selection
-      for (let i = CFG.boards.length - 1; i >= 0; i--) {
-        const b = CFG.boards[i];
-        const dx = wx - b.x_mm;
-        const dy = wy - b.y_mm;
-        if (Math.hypot(dx, dy) <= radius) return b;
+    class OrbitPulseEffect extends BaseEffect {
+      constructor(){ super("orbitPulse","OrbitPulse"); }
+      onEvent(wx, wy){
+        events.push({ x: wx, y: wy, t0_ms: performance.now() });
+        while (events.length > 10) events.shift();
       }
-      return null;
-    }
+      clear(){ events = []; }
+      intensity(led, nowMs){
+        const cfg = CFG.effects.orbitPulse;
+        const t = nowMs/1000;
+        const phase = (t * cfg.angular_deg_s) % 360;
 
-    // =========================
-    // 6) p5 sketch
-    // =========================
-    function setup() {
-      createCanvas(window.innerWidth, window.innerHeight);
-      resetView();
+        let d = Math.abs(((led.worldDeg - phase + 540) % 360) - 180); // 0..180
+        const core = Math.exp(-(d*d) / (2*cfg.band_deg*cfg.band_deg));
 
-      const ta = document.getElementById('config');
-      ta.value = JSON.stringify(CFG, null, 2);
-
-      document.getElementById('apply').onclick = () => {
-        try {
-          const parsed = JSON.parse(ta.value);
-          if (!parsed.boards || parsed.boards.length !== 10) throw new Error("boards は10台必要");
-          CFG = parsed;
-
-          if (selectedBoardId != null && !CFG.boards.some(b => b.id === selectedBoardId)) {
-            selectedBoardId = null;
-          }
-          toast("Applied.");
-        } catch (e) {
-          toast("JSON error: " + e.message);
+        let accent = 0;
+        for (const ev of events){
+          const dt = (nowMs - ev.t0_ms)/1000;
+          if (dt < 0) continue;
+          const life = Math.exp(-dt / cfg.decay_s);
+          const dist = Math.hypot(led.x - ev.x, led.y - ev.y);
+          accent += Math.exp(-(dist*dist)/(2*120*120)) * life;
         }
-      };
+        return Util.clamp01(core*0.85 + accent*0.8);
+      }
+      color(led, a){
+        const hue = (led.worldDeg + 200) % 360;
+        return Util.hsvToRgb(hue, 0.9, a);
+      }
+      info(){ return "角度に沿ってパルスが回転。クリックで局所アクセント。"; }
+    }
 
-      document.getElementById('export').onclick = async () => {
-        const txt = JSON.stringify(CFG, null, 2);
-        try {
-          await navigator.clipboard.writeText(txt);
-          toast("Config copied to clipboard.");
-        } catch {
-          toast("Clipboard failed. (ブラウザ設定で許可してください)");
+    class SweepLineEffect extends BaseEffect {
+      constructor(){ super("sweepLine","SweepLine"); }
+      onEvent(wx, wy){
+        events.push({ x: wx, y: wy, t0_ms: performance.now() });
+        while (events.length > 10) events.shift();
+      }
+      clear(){ events = []; }
+      intensity(led, nowMs){
+        const cfg = CFG.effects.sweepLine;
+        const t = (nowMs/1000) % cfg.period_s;
+        const u = t / cfg.period_s;
+
+        const w = CFG.world.width_mm;
+        const pos = (u < 0.5) ? (u*2)*w : (1 - (u-0.5)*2)*w;
+
+        const d = Math.abs(led.x - pos);
+        const core = Math.exp(-(d*d) / (2*cfg.line_width_mm*cfg.line_width_mm));
+
+        let accent = 0;
+        for (const ev of events){
+          const dt = (nowMs - ev.t0_ms)/1000;
+          if (dt < 0) continue;
+          const life = Math.exp(-dt / cfg.decay_s);
+          const dist = Math.hypot(led.x - ev.x, led.y - ev.y);
+          accent += Math.exp(-(dist*dist)/(2*140*140)) * life;
         }
-      };
-
-      document.getElementById('clearRipples').onclick = () => {
-        ripples = [];
-        toast("Ripples cleared.");
-      };
-
-      document.getElementById('resetView').onclick = () => resetView();
-      document.getElementById('resetBoards').onclick = () => {
-        CFG = structuredClone(DEFAULT_CONFIG);
-        ta.value = JSON.stringify(CFG, null, 2);
-        selectedBoardId = null;
-        toast("Boards reset.");
-      };
-    }
-
-    function resetView() {
-      cam.zoom = 0.45;
-      cam.x = width/2 - (CFG.world.width_mm/2) * cam.zoom;
-      cam.y = height/2 - (CFG.world.height_mm/2) * cam.zoom;
-      toast("View reset.");
-    }
-
-    function drawGrid(step=100) {
-      stroke(255, 255, 255, 18);
-      strokeWeight(1);
-      noFill();
-
-      const topLeft = screenToWorld(0,0);
-      const bottomRight = screenToWorld(width,height);
-
-      const x0 = Math.floor(topLeft.x / step) * step;
-      const y0 = Math.floor(topLeft.y / step) * step;
-
-      for (let x = x0; x < bottomRight.x + step; x += step) {
-        const a = worldToScreen(x, topLeft.y);
-        const b = worldToScreen(x, bottomRight.y);
-        line(a.x, a.y, b.x, b.y);
+        return Util.clamp01(core*0.9 + accent*0.8);
       }
-      for (let y = y0; y < bottomRight.y + step; y += step) {
-        const a = worldToScreen(topLeft.x, y);
-        const b = worldToScreen(bottomRight.x, y);
-        line(a.x, a.y, b.x, b.y);
+      color(led, a){
+        return Util.hsvToRgb(180, 0.65, a);
       }
+      info(){ return "X方向に走査線が往復。クリックで局所アクセント。"; }
     }
 
-    function draw() {
-      background(11, 15, 20);
+    class NoiseSparkleEffect extends BaseEffect {
+      constructor(){ super("noiseSparkle","NoiseSparkle"); }
+      onEvent(wx, wy){
+        events.push({ x: wx, y: wy, t0_ms: performance.now() });
+        while (events.length > 20) events.shift();
+      }
+      clear(){ events = []; }
+      intensity(led, nowMs){
+        const cfg = CFG.effects.noiseSparkle;
+        const tick = Math.floor(nowMs / 60);
 
-      drawGrid(100);
+        // xorshift-ish pseudo random
+        let x = (led.ledIndex + led.boardId*97 + tick*131) >>> 0;
+        x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
+        const rnd = ((x >>> 0) % 10000) / 10000;
 
-      const ledWorld = computeAllLedWorldPositions();
-      const frame = computeFrameRGB(ledWorld);
+        let a = (rnd < cfg.density) ? 1.0 : 0.0;
 
-      // draw boards (circles)
-      const radius = CFG.board.diameter_mm / 2;
-
-      for (const b of CFG.boards) {
-        const sc = worldToScreen(b.x_mm, b.y_mm);
-        const rpx = radius * cam.zoom;
-
-        const isSel = (b.id === selectedBoardId);
-
-        // outer circle
-        noFill();
-        stroke(255,255,255, isSel ? 220 : 110);
-        strokeWeight(isSel ? 2 : 1.3);
-        circle(sc.x, sc.y, rpx * 2);
-
-        // ring guides (optional)
-        if (CFG.view && CFG.view.show_ring_guides) {
-          stroke(255,255,255, isSel ? 55 : 30);
-          strokeWeight(1);
-          for (const ring of CFG.ledRings) {
-            circle(sc.x, sc.y, (ring.diameter_mm/2) * 2 * cam.zoom);
-          }
+        for (const ev of events){
+          const dt = (nowMs - ev.t0_ms)/1000;
+          if (dt < 0) continue;
+          const life = Math.exp(-dt / cfg.decay_s);
+          const dist = Math.hypot(led.x - ev.x, led.y - ev.y);
+          const boost = Math.exp(-(dist*dist)/(2*160*160)) * life;
+          a = Util.clamp01(a + boost);
         }
-
-        // id label
-        noStroke();
-        fill(255,255,255, isSel ? 230 : 170);
-        textSize(12);
-        textAlign(CENTER, CENTER);
-        text(`B${b.id}`, sc.x, sc.y - rpx - 12);
-
-        // rotation indicator (a small line from center)
-        const rad = (b.rot_deg || 0) * Math.PI/180;
-        const dir = rot2d(radius, 0, rad); // local (+x) rotated
-        const end = worldToScreen(b.x_mm + dir.x, b.y_mm + dir.y);
-        stroke(255,255,255, isSel ? 170 : 90);
-        strokeWeight(2);
-        line(sc.x, sc.y, end.x, end.y);
+        return a;
       }
-
-      // draw LEDs
-      noStroke();
-      for (let i=0; i<ledWorld.length; i++) {
-        const p = ledWorld[i];
-        const s = worldToScreen(p.x, p.y);
-
-        const r = frame[i*3+0], g = frame[i*3+1], b = frame[i*3+2];
-        fill(r, g, b, 235);
-
-        const dot = Math.max(2, 6 * cam.zoom);
-        circle(s.x, s.y, dot);
+      color(led, a){
+        return Util.hsvToRgb(280, 0.85, a);
       }
+      info(){ return "ランダム瞬き。クリック周辺だけ一時的に密度UP。"; }
+    }
 
-      // draw ripple rings
-      for (const ev of ripples) {
-        const now = performance.now();
-        const t_s = (now - ev.t0_ms)/1000;
-        const r_mm = CFG.ripple.speed_mm_s * t_s;
-        const sc = worldToScreen(ev.x, ev.y);
-        noFill();
-        stroke(150, 210, 255, 80);
+    const Effects = {
+      map: {},
+      currentId: "ripple",
+      register(effect){ this.map[effect.id] = effect; },
+      current(){ return this.map[this.currentId]; },
+      set(id){
+        if (!this.map[id]) return;
+        if (this.currentId === id) return;
+        this.current()?.onExit?.();
+        this.currentId = id;
+        this.current()?.onEnter?.();
+        UI.toast(`Effect: ${this.current().name}`);
+        UI.updateEffectInfo();
+      }
+    };
+
+    Effects.register(new RippleEffect());
+    Effects.register(new OrbitPulseEffect());
+    Effects.register(new SweepLineEffect());
+    Effects.register(new NoiseSparkleEffect());
+
+    // ============================================================
+    // 4) OUTPUTS (draw + (future) send)
+    // ============================================================
+    const Outputs = {
+      // --- Draw (p5) ---
+      drawScene(ledWorld, frame){
+        background(11, 15, 20);
+        this.drawGrid(100);
+
+        this.drawBoards();
+        this.drawLeds(ledWorld, frame);
+        this.drawHud();
+      },
+
+      // Grid with axis ticks/labels (top/left)
+      drawGrid(step=100){
+        stroke(255, 255, 255, 18);
         strokeWeight(1);
-        circle(sc.x, sc.y, r_mm * 2 * cam.zoom);
-      }
+        noFill();
 
-      // HUD
-      const w = screenToWorld(mouseX, mouseY);
-      noStroke();
-      fill(255,255,255,160);
-      textSize(12);
-      textAlign(LEFT, BOTTOM);
-      const selText = (selectedBoardId == null) ? "-" : `B${selectedBoardId}`;
-      text(`mouse(mm): ${w.x.toFixed(1)}, ${w.y.toFixed(1)} | zoom:${cam.zoom.toFixed(2)} | sel:${selText} | ripples:${ripples.length}`, 12, height - 12);
-    }
+        const topLeft = Input.screenToWorld(0,0);
+        const bottomRight = Input.screenToWorld(width,height);
 
-    function mousePressed() {
-      if (isOnUI()) return;
+        const x0 = Math.floor(topLeft.x / step) * step;
+        const y0 = Math.floor(topLeft.y / step) * step;
 
-      const w = screenToWorld(mouseX, mouseY);
-
-      const hit = hitTestBoard(w.x, w.y);
-
-      if (hit) {
-        selectedBoardId = hit.id;
-
-        dragMode = keyIsDown(SHIFT) ? "boardRotate" : "boardMove";
-        dragStart = { sx: mouseX, sy: mouseY, wx: w.x, wy: w.y };
-        boardStart = { x: hit.x_mm, y: hit.y_mm, rot: hit.rot_deg || 0 };
-
-      } else {
-        // empty click => ripple
-        if (mouseButton === LEFT) addRipple(w.x, w.y);
-
-        // pan start
-        dragMode = "pan";
-        dragging = true;
-        dragPrev = { x: mouseX, y: mouseY };
-      }
-    }
-
-    function mouseDragged() {
-      if (dragMode === "pan") {
-        const dx = mouseX - dragPrev.x;
-        const dy = mouseY - dragPrev.y;
-        cam.x += dx;
-        cam.y += dy;
-        dragPrev = { x: mouseX, y: mouseY };
-        return;
-      }
-
-      if (dragMode === "boardMove" || dragMode === "boardRotate") {
-        const b = CFG.boards.find(bb => bb.id === selectedBoardId);
-        if (!b) return;
-
-        const w = screenToWorld(mouseX, mouseY);
-
-        if (dragMode === "boardMove") {
-          const dx = w.x - dragStart.wx;
-          const dy = w.y - dragStart.wy;
-
-          let nx = boardStart.x + dx;
-          let ny = boardStart.y + dy;
-
-          if (!keyIsDown(ALT)) {
-            nx = snap(nx);
-            ny = snap(ny);
-          }
-
-          b.x_mm = nx;
-          b.y_mm = ny;
-
-        } else {
-          // rotate by horizontal drag (simple + intuitive)
-          const px = mouseX - dragStart.sx;
-          let nr = boardStart.rot + px * 0.3;
-
-          if (!keyIsDown(ALT)) {
-            nr = Math.round(nr / 15) * 15;
-          }
-
-          b.rot_deg = nr;
+        // --- grid lines ---
+        for (let x = x0; x < bottomRight.x + step; x += step) {
+          const a = Input.worldToScreen(x, topLeft.y);
+          const b = Input.worldToScreen(x, bottomRight.y);
+          line(a.x, a.y, b.x, b.y);
         }
+        for (let y = y0; y < bottomRight.y + step; y += step) {
+          const a = Input.worldToScreen(topLeft.x, y);
+          const b = Input.worldToScreen(bottomRight.x, y);
+          line(a.x, a.y, b.x, b.y);
+        }
+
+        // --- axis ticks + labels ---
+        const labelPx = 14;
+        const tickPx = 6;
+
+        fill(255,255,255,120);
+        textSize(11);
+
+        // X axis labels (top)
+        textAlign(CENTER, TOP);
+        for (let x = x0; x < bottomRight.x + step; x += step) {
+          const s = Input.worldToScreen(x, topLeft.y);
+          stroke(255,255,255,80);
+          strokeWeight(1);
+          line(s.x, 0, s.x, tickPx);
+          noStroke();
+          if (Input.cam.zoom > 0.18) text(`${Math.round(x)}`, s.x, labelPx);
+        }
+
+        // Y axis labels (left)
+        textAlign(LEFT, CENTER);
+        for (let y = y0; y < bottomRight.y + step; y += step) {
+          const s = Input.worldToScreen(topLeft.x, y);
+          stroke(255,255,255,80);
+          strokeWeight(1);
+          line(0, s.y, tickPx, s.y);
+          noStroke();
+          if (Input.cam.zoom > 0.18) text(`${Math.round(y)}`, labelPx, s.y);
+        }
+      },
+
+      drawBoards(){
+        const radius = CFG.board.diameter_mm / 2;
+
+        for (const b of CFG.boards) {
+          const sc = Input.worldToScreen(b.x_mm, b.y_mm);
+          const rpx = radius * Input.cam.zoom;
+          const isSel = (b.id === Input.selectedBoardId);
+
+          // outer circle
+          noFill();
+          stroke(255,255,255, isSel ? 220 : 110);
+          strokeWeight(isSel ? 2 : 1.3);
+          circle(sc.x, sc.y, rpx * 2);
+
+          // ring guides
+          if (CFG.view?.show_ring_guides) {
+            stroke(255,255,255, isSel ? 60 : 30);
+            strokeWeight(1);
+            const map = CFG.ledMapping;
+            circle(sc.x, sc.y, map.outer.diameter_mm * Input.cam.zoom);
+            circle(sc.x, sc.y, map.mid.diameter_mm   * Input.cam.zoom);
+            circle(sc.x, sc.y, map.inner.diameter_mm * Input.cam.zoom);
+          }
+
+          // id label
+          noStroke();
+          fill(255,255,255, isSel ? 235 : 170);
+          textSize(12);
+          textAlign(CENTER, CENTER);
+          text(`B${b.id}`, sc.x, sc.y - rpx - 12);
+
+          // rotation indicator
+          const rad = (b.rot_deg || 0) * Math.PI/180;
+          const dir = Util.rot2d(radius, 0, rad);
+          const end = Input.worldToScreen(b.x_mm + dir.x, b.y_mm + dir.y);
+          stroke(255,255,255, isSel ? 170 : 90);
+          strokeWeight(2);
+          line(sc.x, sc.y, end.x, end.y);
+        }
+      },
+
+      drawLeds(ledWorld, frame){
+        const showLabels = CFG.view?.show_index_labels;
+        noStroke();
+
+        for (let i=0; i<ledWorld.length; i++){
+          const led = ledWorld[i];
+          const s = Input.worldToScreen(led.x, led.y);
+
+          const r = frame[i*3+0], g = frame[i*3+1], b = frame[i*3+2];
+          fill(r, g, b, 235);
+
+          const dot = Math.max(2, CFG.runtime.dot_base_px * Input.cam.zoom);
+          circle(s.x, s.y, dot);
+
+          if (showLabels && Input.cam.zoom > 0.8){
+            fill(255,255,255,180);
+            textSize(10);
+            textAlign(CENTER, CENTER);
+            text(String(led.ledIndex), s.x, s.y - 10);
+          }
+        }
+      },
+
+      drawHud(){
+        const w = Input.screenToWorld(mouseX, mouseY);
+        noStroke();
+        fill(255,255,255,160);
+        textSize(12);
+        textAlign(LEFT, BOTTOM);
+        const selText = (Input.selectedBoardId == null) ? "-" : `B${Input.selectedBoardId}`;
+        text(`effect:${Effects.current().name} | mouse(mm): ${w.x.toFixed(1)},${w.y.toFixed(1)} | zoom:${Input.cam.zoom.toFixed(2)} | sel:${selText}`, 12, height - 12);
+      },
+
+      // --- Send (placeholder) ---
+      // ここを後で WebSerial / WebSocket / USB-Bridge に差し替える
+      sendFrame(frame){
+        // no-op for now
       }
-    }
+    };
 
-    function mouseReleased() {
-      dragging = false;
-      dragMode = "none";
-    }
+    // ============================================================
+    // 5) INPUT (mouse/keyboard + camera + selection)
+    // ============================================================
+    const Input = {
+      cam: { x:0, y:0, zoom:0.45 },
+      selectedBoardId: null,
+      dragMode: "none", // "none" | "pan" | "boardMove" | "boardRotate"
+      dragPrev: { x:0, y:0 },
+      dragStart: { sx:0, sy:0, wx:0, wy:0 },
+      boardStart: { x:0, y:0, rot:0 },
 
-    function mouseWheel(e) {
-      if (isOnUI()) return;
+      worldToScreen(wx, wy){ return { x: wx * this.cam.zoom + this.cam.x, y: wy * this.cam.zoom + this.cam.y }; },
+      screenToWorld(sx, sy){ return { x: (sx - this.cam.x) / this.cam.zoom, y: (sy - this.cam.y) / this.cam.zoom }; },
 
-      const before = screenToWorld(mouseX, mouseY);
-      const z = cam.zoom;
-      const factor = (e.deltaY > 0) ? 0.92 : 1.08;
-      cam.zoom = Math.max(0.08, Math.min(3.0, z * factor));
-      const after = screenToWorld(mouseX, mouseY);
+      resetView(){
+        this.cam.zoom = 0.45;
+        this.cam.x = width/2 - (CFG.world.width_mm/2) * this.cam.zoom;
+        this.cam.y = height/2 - (CFG.world.height_mm/2) * this.cam.zoom;
+      },
 
-      cam.x += (after.x - before.x) * cam.zoom;
-      cam.y += (after.y - before.y) * cam.zoom;
+      isOnUI(){
+        const ui = document.getElementById('ui');
+        const rect = ui.getBoundingClientRect();
+        return (mouseX >= rect.left && mouseX <= rect.right && mouseY >= rect.top && mouseY <= rect.bottom);
+      },
 
-      return false;
-    }
+      hitTestBoard(wx, wy){
+        const radius = CFG.board.diameter_mm / 2;
+        for (let i = CFG.boards.length - 1; i >= 0; i--) {
+          const b = CFG.boards[i];
+          if (Math.hypot(wx - b.x_mm, wy - b.y_mm) <= radius) return b;
+        }
+        return null;
+      },
 
-    function windowResized() {
-      resizeCanvas(window.innerWidth, window.innerHeight);
-    }
+      snapMm(v){ return Math.round(v / 10) * 10; },
 
-    // =========================
-    // toast
-    // =========================
-    let toastTimer = null;
-    function toast(msg) {
-      const el = document.getElementById('toast');
-      el.textContent = msg;
-      el.classList.add('show');
-      if (toastTimer) clearTimeout(toastTimer);
-      toastTimer = setTimeout(() => el.classList.remove('show'), 1200);
-    }
+      mousePressed(){
+        if (this.isOnUI()) return;
+
+        const w = this.screenToWorld(mouseX, mouseY);
+        const hit = this.hitTestBoard(w.x, w.y);
+
+        if (hit) {
+          this.selectedBoardId = hit.id;
+          this.dragMode = keyIsDown(SHIFT) ? "boardRotate" : "boardMove";
+          this.dragStart = { sx: mouseX, sy: mouseY, wx: w.x, wy: w.y };
+          this.boardStart = { x: hit.x_mm, y: hit.y_mm, rot: hit.rot_deg || 0 };
+        } else {
+          // empty click -> effect event
+          Effects.current().onEvent?.(w.x, w.y);
+
+          // also allow pan if drag
+          this.dragMode = "pan";
+          this.dragPrev = { x: mouseX, y: mouseY };
+        }
+      },
+
+      mouseDragged(){
+        if (this.dragMode === "pan") {
+          const dx = mouseX - this.dragPrev.x;
+          const dy = mouseY - this.dragPrev.y;
+          this.cam.x += dx;
+          this.cam.y += dy;
+          this.dragPrev = { x: mouseX, y: mouseY };
+          return;
+        }
+
+        if (this.dragMode === "boardMove" || this.dragMode === "boardRotate") {
+          const b = CFG.boards.find(bb => bb.id === this.selectedBoardId);
+          if (!b) return;
+
+          const w = this.screenToWorld(mouseX, mouseY);
+
+          if (this.dragMode === "boardMove") {
+            const dx = w.x - this.dragStart.wx;
+            const dy = w.y - this.dragStart.wy;
+
+            let nx = this.boardStart.x + dx;
+            let ny = this.boardStart.y + dy;
+
+            if (!keyIsDown(ALT)) { nx = this.snapMm(nx); ny = this.snapMm(ny); }
+
+            b.x_mm = nx; b.y_mm = ny;
+          } else {
+            const px = mouseX - this.dragStart.sx;
+            let nr = this.boardStart.rot + px * 0.3;
+            if (!keyIsDown(ALT)) nr = Math.round(nr / 15) * 15;
+            b.rot_deg = nr;
+          }
+        }
+      },
+
+      mouseReleased(){
+        if (this.dragMode === "boardMove" || this.dragMode === "boardRotate") {
+          saveCFG();
+          UI.syncTextarea();   // ← 追加
+          UI.toast("Saved.");
+        }
+        this.dragMode = "none";
+      },
+
+
+      mouseWheel(e){
+        if (this.isOnUI()) return;
+
+        const before = this.screenToWorld(mouseX, mouseY);
+        const factor = (e.deltaY > 0) ? 0.92 : 1.08;
+
+        this.cam.zoom = Math.max(0.08, Math.min(3.0, this.cam.zoom * factor));
+
+        const after = this.screenToWorld(mouseX, mouseY);
+        this.cam.x += (after.x - before.x) * this.cam.zoom;
+        this.cam.y += (after.y - before.y) * this.cam.zoom;
+
+        return false;
+      },
+
+      keyPressed(){
+        if (key === '1') Effects.set('ripple');
+        if (key === '2') Effects.set('orbitPulse');
+        if (key === '3') Effects.set('sweepLine');
+        if (key === '4') Effects.set('noiseSparkle');
+      }
+    };
+
+    // ============================================================
+    // 6) UI helpers (apply/export/toast)
+    // ============================================================
+    const UI = {
+      ta: null,
+      init(){
+        this.ta = document.getElementById("config");
+        this.ta.value = JSON.stringify(CFG, null, 2);
+
+        document.getElementById('apply').onclick = () => {
+          try {
+            const parsed = JSON.parse(this.ta.value);
+            if (!parsed.boards || parsed.boards.length !== 10) throw new Error("boards は10台必要");
+            CFG = parsed;
+            saveCFG();
+            this.toast("Applied & saved.");
+            this.updateEffectInfo();
+          } catch (e) {
+            this.toast("JSON error: " + e.message);
+          }
+        };
+
+        document.getElementById('export').onclick = async () => {
+          const txt = JSON.stringify(CFG, null, 2);
+          try { await navigator.clipboard.writeText(txt); this.toast("Config copied."); }
+          catch { this.toast("Clipboard failed."); }
+        };
+
+        document.getElementById('clearEvents').onclick = () => {
+          Effects.current().clear?.();
+          events = [];
+          this.toast("Events cleared.");
+        };
+
+        document.getElementById('resetView').onclick = () => {
+          Input.resetView();
+          this.toast("View reset.");
+        };
+
+        document.getElementById('resetBoards').onclick = () => {
+          CFG = structuredClone(DEFAULT_CONFIG);
+          this.ta.value = JSON.stringify(CFG, null, 2);
+          Input.selectedBoardId = null;
+          saveCFG();
+          this.toast("Boards reset & saved.");
+          this.updateEffectInfo();
+        };
+
+        this.updateEffectInfo();
+      },
+
+      syncTextarea(){
+        if (!this.ta) return;
+        this.ta.value = JSON.stringify(CFG, null, 2);
+      },
+
+      updateEffectInfo(){
+        const e = Effects.current();
+        document.getElementById("effectInfo").textContent =
+          `現在: ${e.name} / ${e.info()}（追加する時はEffectを1クラス足すだけ）`;
+      },
+
+      toast(msg){
+        const el = document.getElementById('toast');
+        el.textContent = msg;
+        el.classList.add('show');
+        if (this._timer) clearTimeout(this._timer);
+        this._timer = setTimeout(() => el.classList.remove('show'), 1200);
+      },
+      _timer: null
+    };
+
+    // ============================================================
+    // 7) APP (one-frame pipeline)
+    // ============================================================
+    const App = {
+      ledWorld: [],
+      frame: null,
+
+      setup(){
+        createCanvas(window.innerWidth, window.innerHeight);
+
+        const loaded = loadCFG(); // 前回の設定を復元
+        Input.resetView();
+        UI.init();
+
+        if (loaded) {
+          UI.ta.value = JSON.stringify(CFG, null, 2);
+          UI.toast("Loaded saved layout.");
+        }
+      },
+
+      update(){
+        const nowMs = performance.now();
+
+        // (1) Geometry: positions
+        this.ledWorld = Geometry.ledWorld();
+
+        // (2) Effect: intensity + color -> frame(RGB)
+        this.frame = this.computeFrame(this.ledWorld, nowMs);
+
+        // (3) Output: draw + (future) send
+        Outputs.drawScene(this.ledWorld, this.frame);
+        Outputs.sendFrame(this.frame);
+      },
+
+      computeFrame(ledWorld, nowMs){
+        const frame = new Uint8Array(480 * 3);
+        const eff = Effects.current();
+        const gamma = CFG.runtime.gamma;
+
+        for (let i=0; i<ledWorld.length; i++){
+          const led = ledWorld[i];
+
+          const a = Util.clamp01(eff.intensity(led, nowMs));
+          const rgb = eff.color(led, a);
+
+          const rr = Math.pow(rgb.r, gamma);
+          const gg = Math.pow(rgb.g, gamma);
+          const bb = Math.pow(rgb.b, gamma);
+
+          frame[i*3+0] = Math.max(0, Math.min(255, Math.round(rr * 255)));
+          frame[i*3+1] = Math.max(0, Math.min(255, Math.round(gg * 255)));
+          frame[i*3+2] = Math.max(0, Math.min(255, Math.round(bb * 255)));
+        }
+        return frame;
+      }
+    };
+
+    // ============================================================
+    // p5 entry points
+    // ============================================================
+    function setup(){ App.setup(); }
+    function draw(){ App.update(); }
+
+    function mousePressed(){ Input.mousePressed(); }
+    function mouseDragged(){ Input.mouseDragged(); }
+    function mouseReleased(){ Input.mouseReleased(); }
+    function mouseWheel(e){ return Input.mouseWheel(e); }
+    function keyPressed(){ Input.keyPressed(); }
+    function windowResized(){ resizeCanvas(window.innerWidth, window.innerHeight); }
   </script>
 </body>
 </html>
