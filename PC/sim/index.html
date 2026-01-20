@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pico Lチカ最小（WebSerial）</title>
+
+  <style>
+    body {
+      font-family: system-ui, sans-serif;
+      padding: 16px;
+    }
+    h1 {
+      margin-bottom: 12px;
+    }
+    button {
+      font-size: 16px;
+      padding: 10px 14px;
+      margin-right: 8px;
+      margin-bottom: 8px;
+    }
+    #log {
+      white-space: pre-wrap;
+      background: #f5f5f5;
+      padding: 12px;
+      border-radius: 8px;
+      margin-top: 12px;
+      height: 220px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Pico Lチカ最小（WebSerial）</h1>
+
+  <button id="connect">接続</button>
+  <button id="disconnect" disabled>切断</button>
+  <br/>
+  <button id="toggle" disabled>TOGGLE</button>
+  <button id="on" disabled>ON</button>
+  <button id="off" disabled>OFF</button>
+
+  <div id="log"></div>
+
+  <script>
+    let port = null;
+    let writer = null;
+    let reader = null;
+
+    const logEl = document.getElementById("log");
+
+    const btnConnect = document.getElementById("connect");
+    const btnDisconnect = document.getElementById("disconnect");
+    const btnToggle = document.getElementById("toggle");
+    const btnOn = document.getElementById("on");
+    const btnOff = document.getElementById("off");
+
+    function log(msg) {
+      logEl.textContent += msg + "\n";
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setConnected(state) {
+      btnToggle.disabled = !state;
+      btnOn.disabled = !state;
+      btnOff.disabled = !state;
+      btnDisconnect.disabled = !state;
+    }
+
+    async function connect() {
+      if (!("serial" in navigator)) {
+        alert("このブラウザはWebSerial非対応です。Chrome/Edgeを使ってください。");
+        return;
+      }
+
+      try {
+        port = await navigator.serial.requestPort();
+        await port.open({ baudRate: 115200 });
+
+        const textEncoder = new TextEncoderStream();
+        textEncoder.readable.pipeTo(port.writable);
+        writer = textEncoder.writable.getWriter();
+
+        const textDecoder = new TextDecoderStream();
+        port.readable.pipeTo(textDecoder.writable);
+        reader = textDecoder.readable.getReader();
+
+        log("CONNECTED");
+        setConnected(true);
+
+        // Picoからのログを読む
+        (async () => {
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              if (value) log("PICO> " + value.trimEnd());
+            }
+          } catch (e) {
+            log("READ ERR: " + e);
+          }
+        })();
+
+      } catch (e) {
+        log("CONNECT ERR: " + e);
+        setConnected(false);
+      }
+    }
+
+    async function disconnect() {
+      try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch(e){}
+      try { if (writer) { await writer.close(); writer.releaseLock(); } } catch(e){}
+      try { if (port) { await port.close(); } } catch(e){}
+
+      reader = null;
+      writer = null;
+      port = null;
+
+      log("DISCONNECTED");
+      setConnected(false);
+    }
+
+    async function sendLine(line) {
+      if (!writer) {
+        log("NO CONNECTION");
+        return;
+      }
+      try {
+        await writer.write(line + "\n");
+        log("PC> " + line);
+      } catch (e) {
+        log("WRITE ERR: " + e);
+      }
+    }
+
+    btnConnect.addEventListener("click", connect);
+    btnDisconnect.addEventListener("click", disconnect);
+
+    btnToggle.addEventListener("click", () => sendLine("TOGGLE"));
+    btnOn.addEventListener("click", () => sendLine("ON"));
+    btnOff.addEventListener("click", () => sendLine("OFF"));
+
+    // ページ更新・終了時にクリーンに切断（ベストエフォート）
+    window.addEventListener("beforeunload", () => {
+      try { reader && reader.cancel(); } catch(e){}
+      try { writer && writer.close(); } catch(e){}
+      try { port && port.close(); } catch(e){}
+    });
+  </script>
+</body>
+</html>

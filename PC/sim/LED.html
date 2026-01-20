@@ -64,6 +64,8 @@
       <button id="connect">Connect Pico</button>
       <button id="disconnect" disabled>Disconnect</button>
     </div>
+    <button id="testWhite">Test White</button>
+
 
     <!-- 既存 -->
     <div class="row">
@@ -744,6 +746,18 @@
       init(){
         this.ta = document.getElementById("config");
         this.ta.value = JSON.stringify(CFG, null, 2);
+
+        document.getElementById('testWhite').onclick = async () => {
+          if (!serialWriter) { UI.toast("Not connected"); return; }
+          const frame = new Uint8Array(480*3);
+          for (let i=0; i<480; i++){
+            frame[i*3+0] = 255;
+            frame[i*3+1] = 255;
+            frame[i*3+2] = 255;
+          }
+          serialWriter.write(frame);
+          UI.toast("Sent WHITE frame");
+        };
 
         // serial buttons
         document.getElementById('connect').onclick = async () => {

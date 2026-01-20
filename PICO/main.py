@@ -1,32 +1,48 @@
-import machine
-import neopixel
+from machine import Pin
+import time
 import sys
 
-PIN_A = machine.Pin(2)
-PIN_B = machine.Pin(3)
+# LED
+try:
+    led = Pin("LED", Pin.OUT)
+except Exception:
+    led = Pin(25, Pin.OUT)
 
-NUM = 240
+# --- USB安定待ち ---
+# WebSerialは open 後しばらく stdout が死んでることがある
+time.sleep(1.5)
 
-np_a = neopixel.NeoPixel(PIN_A, NUM)
-np_b = neopixel.NeoPixel(PIN_B, NUM)
+# ダミー出力（捨てられてOK）
+for _ in range(3):
+    try:
+        sys.stdout.write("")
+        sys.stdout.flush()
+    except:
+        pass
+    time.sleep(0.2)
 
-BUF_LEN = 480 * 3
+print("READY")   # ← ここで初めて出す
 
 while True:
-    data = sys.stdin.buffer.read(BUF_LEN)
-    if not data or len(data) < BUF_LEN:
+    try:
+        line = sys.stdin.readline()
+    except Exception:
         continue
 
-    for i in range(NUM):
-        np_a[i] = (data[i*3], data[i*3+1], data[i*3+2])
+    if not line:
+        time.sleep(0.01)
+        continue
 
-    base = NUM * 3
-    for i in range(NUM):
-        np_b[i] = (
-            data[base + i*3],
-            data[base + i*3+1],
-            data[base + i*3+2]
-        )
+    sys.stdout.write("ECHO:" + line)
+    sys.stdout.flush()
 
-    np_a.write()
-    np_b.write()
+    cmd = line.strip().upper()
+    if cmd == "TOGGLE":
+        led.value(0 if led.value() else 1)
+        print("OK TOGGLE")
+    elif cmd == "ON":
+        led.value(1)
+        print("OK ON")
+    elif cmd == "OFF":
+        led.value(0)
+        print("OK OFF")
