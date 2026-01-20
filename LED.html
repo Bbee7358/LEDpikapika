@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Round LED Boards Simulator (10 boards x 48 leds)</title>
+  <style>
+    html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: ui-sans-serif, system-ui; }
+    #ui {
+      position: fixed; top: 12px; left: 12px; z-index: 10;
+      width: 380px; max-width: calc(100vw - 24px);
+      background: rgba(20, 28, 40, 0.92);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px; padding: 12px;
+      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      backdrop-filter: blur(8px);
+    }
+    #ui h1 { margin:0 0 8px; font-size: 14px; font-weight: 700; letter-spacing: .02em; }
+    #ui .row { display:flex; gap:8px; margin: 8px 0; }
+    #ui button {
+      flex:1; padding: 8px 10px; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(255,255,255,0.06); color:#e8eef7;
+      cursor: pointer;
+    }
+    #ui button:hover { background: rgba(255,255,255,0.10); }
+    #ui textarea {
+      width:100%; height: 210px; resize: vertical;
+      border-radius: 10px; padding: 10px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.20); color:#e8eef7;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 11px; line-height: 1.35;
+    }
+    #ui .hint { font-size: 11px; opacity: .88; line-height: 1.55; }
+    #toast {
+      position: fixed; bottom: 12px; left: 12px; z-index: 20;
+      background: rgba(20, 28, 40, 0.92); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 10px; padding: 8px 10px; font-size: 12px; opacity: 0;
+      transform: translateY(8px); transition: .2s;
+    }
+    #toast.show { opacity: 1; transform: translateY(0px); }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <h1>Round LED Boards Simulator</h1>
+    <div class="hint">
+      ・基板クリック：選択（座標は中心 x_mm,y_mm）<br>
+      ・基板ドラッグ：移動（10mmスナップ / Altで無効）<br>
+      ・Shift+基板ドラッグ(左右)：回転（15°スナップ / Altで無効）<br>
+      ・空白ドラッグ：パン　・ホイール：ズーム<br>
+      ・空白左クリック：波紋を追加<br><br>
+      LED配置（48個）：<br>
+      直径18mm(0°開始,6) / 直径34mm(15°開始,12) / 直径92mm(0°開始,30)
+    </div>
+
+    <div class="row">
+      <button id="apply">Apply</button>
+      <button id="export">Export</button>
+      <button id="clearRipples">Ripples Clear</button>
+    </div>
+
+    <textarea id="config"></textarea>
+
+    <div class="row">
+      <button id="resetView">Reset View</button>
+      <button id="resetBoards">Reset Boards</button>
+    </div>
+
+    <div class="hint">
+      ※次の段階で、このシミュの「480個RGB配列」をそのままUSBでPicoへ送れば、現実の点灯に接続できる。
+    </div>
+  </div>
+
+  <div id="toast"></div>
+
+  <!-- p5.js (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
+
+  <script>
+    // =========================
+    // 1) Config
+    // =========================
+    const DEFAULT_CONFIG = {
+      world: { width_mm: 2400, height_mm: 1400 }, // 表示の目安（実寸に合わせて自由に変えてOK）
+      board: { diameter_mm: 100 },
+      ledRings: [
+        { diameter_mm: 18, count: 6,  start_deg: 0  },
+        { diameter_mm: 34, count: 12, start_deg: 15 },
+        { diameter_mm: 92, count: 30, start_deg: 0  },
+      ],
+      boards: Array.from({length: 10}).map((_, i) => ({
+        id: i,
+        // 円の中心座標 (mm)
+        x_mm: 300 + (i%5)*220,
+        y_mm: 280 + Math.floor(i/5)*320,
+        rot_deg: 0
+      })),
+      ripple: {
+        speed_mm_s: 650,     // 波の広がり速度
+        ring_width_mm: 55,   // 輪の太さ（大きいほどボヤける）
+        decay_s: 2.0         // 消える速さ（大きいほど長持ち）
+      },
+      view: {
+        show_ring_guides: true // 基板内のリングガイド表示
+      }
+    };
+
+    let CFG = structuredClone(DEFAULT_CONFIG);
+
+    // =========================
+    // 2) Camera (pan / zoom)
+    // =========================
+    let cam = { x: 0, y: 0, zoom: 0.5 };
+
+    function worldToScreen(wx, wy) {
+      return { x: wx * cam.zoom + cam.x, y: wy * cam.zoom + cam.y };
+    }
+    function screenToWorld(sx, sy) {
+      return { x: (sx - cam.x) / cam.zoom, y: (sy - cam.y) / cam.zoom };
+    }
+
+    // =========================
+    // 3) LED layout (ring-based)
+    // =========================
+    // 0° is to the right (+x), CCW positive.
+    // screen Y is down, but we treat world Y up by using y = -sin.
+    function polarToXY(radius_mm, deg) {
+      const th = deg * Math.PI / 180;
+      return { x: radius_mm * Math.cos(th), y: radius_mm * -Math.sin(th) };
+    }
+
+    // returns 48 points in board-local coordinates (mm), centered at (0,0)
+    function computeLedLocalPositions() {
+      const pts = [];
+      for (const ring of CFG.ledRings) {
+        const r = ring.diameter_mm / 2;
+        for (let i = 0; i < ring.count; i++) {
+          const deg = ring.start_deg + i * (360 / ring.count);
+          pts.push({ ...polarToXY(r, deg), ring });
+        }
+      }
+      // should be 48
+      return pts.slice(0, 48);
+    }
+
+    function rot2d(x, y, rad) {
+      const cs = Math.cos(rad), sn = Math.sin(rad);
+      return { x: x*cs - y*sn, y: x*sn + y*cs };
+    }
+
+    // world LED positions: 10 boards * 48 = 480
+    function computeAllLedWorldPositions() {
+      const local = computeLedLocalPositions();
+      const out = [];
+
+      for (const b of CFG.boards) {
+        const rad = (b.rot_deg || 0) * Math.PI / 180;
+        const cx = b.x_mm, cy = b.y_mm; // board center in world
+
+        for (let i=0; i<48; i++) {
+          const p = local[i];
+          const rp = rot2d(p.x, p.y, rad);
+          out.push({
+            x: cx + rp.x,
+            y: cy + rp.y,
+            boardId: b.id,
+            ledInBoard: i
+          });
+        }
+      }
+      return out;
+    }
+
+    // =========================
+    // 4) Ripple effect
+    // =========================
+    let ripples = []; // {x,y,t0_ms}
+
+    function addRipple(wx, wy) {
+      ripples.push({ x: wx, y: wy, t0_ms: performance.now() });
+      if (ripples.length > 20) ripples.shift();
+    }
+
+    function rippleIntensity(d, t_s) {
+      const v = CFG.ripple.speed_mm_s;
+      const r = v * t_s;
+      const w = CFG.ripple.ring_width_mm;
+      const decay = CFG.ripple.decay_s;
+
+      // gaussian around ring (d ~ r) + time decay
+      const ring = Math.exp(-((d - r)*(d - r)) / (2*w*w));
+      const life = Math.exp(-(t_s) / decay);
+      return ring * life;
+    }
+
+    // HSV -> RGB (0..1)
+    function hsvToRgb(h, s, v) {
+      h = ((h % 360) + 360) % 360;
+      const c = v * s;
+      const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+      const m = v - c;
+      let rp=0,gp=0,bp=0;
+      if (h < 60)      { rp=c; gp=x; bp=0; }
+      else if (h < 120){ rp=x; gp=c; bp=0; }
+      else if (h < 180){ rp=0; gp=c; bp=x; }
+      else if (h < 240){ rp=0; gp=x; bp=c; }
+      else if (h < 300){ rp=x; gp=0; bp=c; }
+      else             { rp=c; gp=0; bp=x; }
+      return { r: (rp+m), g: (gp+m), b: (bp+m) };
+    }
+
+    // returns Uint8Array length 480*3
+    function computeFrameRGB(ledWorld) {
+      const now = performance.now();
+      const frame = new Uint8Array(480 * 3);
+
+      for (let i=0; i<ledWorld.length; i++) {
+        const p = ledWorld[i];
+
+        let a = 0;
+        for (const ev of ripples) {
+          const t_s = (now - ev.t0_ms) / 1000;
+          if (t_s < 0) continue;
+
+          const dx = p.x - ev.x;
+          const dy = p.y - ev.y;
+          const d = Math.hypot(dx, dy);
+
+          a += rippleIntensity(d, t_s);
+        }
+
+        a = Math.min(1, a);
+
+        // 色は距離と座標で少しだけ変化（固定色にしたければ hue を固定すればOK）
+        const hue = 205 + (p.x * 0.01) + (p.y * 0.01);
+        const rgb = hsvToRgb(hue, 0.85, a);
+
+        // gamma-ish
+        const rr = Math.pow(rgb.r, 1.8);
+        const gg = Math.pow(rgb.g, 1.8);
+        const bb = Math.pow(rgb.b, 1.8);
+
+        frame[i*3+0] = Math.max(0, Math.min(255, Math.round(rr * 255)));
+        frame[i*3+1] = Math.max(0, Math.min(255, Math.round(gg * 255)));
+        frame[i*3+2] = Math.max(0, Math.min(255, Math.round(bb * 255)));
+      }
+      return frame;
+    }
+
+    // =========================
+    // 5) Interaction: drag/rotate/pan/zoom
+    // =========================
+    let selectedBoardId = null;
+
+    // pan helpers
+    let dragging = false;
+    let dragPrev = { x:0, y:0 };
+
+    // drag mode: "none" | "pan" | "boardMove" | "boardRotate"
+    let dragMode = "none";
+    let dragStart = { sx:0, sy:0, wx:0, wy:0 };
+    let boardStart = { x:0, y:0, rot:0 };
+
+    const SNAP_MM = 10;
+
+    function snap(v) {
+      return Math.round(v / SNAP_MM) * SNAP_MM;
+    }
+
+    function isOnUI() {
+      const ui = document.getElementById('ui');
+      const rect = ui.getBoundingClientRect();
+      return (mouseX >= rect.left && mouseX <= rect.right && mouseY >= rect.top && mouseY <= rect.bottom);
+    }
+
+    function hitTestBoard(wx, wy) {
+      const radius = CFG.board.diameter_mm / 2;
+
+      // last to first for "topmost" selection
+      for (let i = CFG.boards.length - 1; i >= 0; i--) {
+        const b = CFG.boards[i];
+        const dx = wx - b.x_mm;
+        const dy = wy - b.y_mm;
+        if (Math.hypot(dx, dy) <= radius) return b;
+      }
+      return null;
+    }
+
+    // =========================
+    // 6) p5 sketch
+    // =========================
+    function setup() {
+      createCanvas(window.innerWidth, window.innerHeight);
+      resetView();
+
+      const ta = document.getElementById('config');
+      ta.value = JSON.stringify(CFG, null, 2);
+
+      document.getElementById('apply').onclick = () => {
+        try {
+          const parsed = JSON.parse(ta.value);
+          if (!parsed.boards || parsed.boards.length !== 10) throw new Error("boards は10台必要");
+          CFG = parsed;
+
+          if (selectedBoardId != null && !CFG.boards.some(b => b.id === selectedBoardId)) {
+            selectedBoardId = null;
+          }
+          toast("Applied.");
+        } catch (e) {
+          toast("JSON error: " + e.message);
+        }
+      };
+
+      document.getElementById('export').onclick = async () => {
+        const txt = JSON.stringify(CFG, null, 2);
+        try {
+          await navigator.clipboard.writeText(txt);
+          toast("Config copied to clipboard.");
+        } catch {
+          toast("Clipboard failed. (ブラウザ設定で許可してください)");
+        }
+      };
+
+      document.getElementById('clearRipples').onclick = () => {
+        ripples = [];
+        toast("Ripples cleared.");
+      };
+
+      document.getElementById('resetView').onclick = () => resetView();
+      document.getElementById('resetBoards').onclick = () => {
+        CFG = structuredClone(DEFAULT_CONFIG);
+        ta.value = JSON.stringify(CFG, null, 2);
+        selectedBoardId = null;
+        toast("Boards reset.");
+      };
+    }
+
+    function resetView() {
+      cam.zoom = 0.45;
+      cam.x = width/2 - (CFG.world.width_mm/2) * cam.zoom;
+      cam.y = height/2 - (CFG.world.height_mm/2) * cam.zoom;
+      toast("View reset.");
+    }
+
+    function drawGrid(step=100) {
+      stroke(255, 255, 255, 18);
+      strokeWeight(1);
+      noFill();
+
+      const topLeft = screenToWorld(0,0);
+      const bottomRight = screenToWorld(width,height);
+
+      const x0 = Math.floor(topLeft.x / step) * step;
+      const y0 = Math.floor(topLeft.y / step) * step;
+
+      for (let x = x0; x < bottomRight.x + step; x += step) {
+        const a = worldToScreen(x, topLeft.y);
+        const b = worldToScreen(x, bottomRight.y);
+        line(a.x, a.y, b.x, b.y);
+      }
+      for (let y = y0; y < bottomRight.y + step; y += step) {
+        const a = worldToScreen(topLeft.x, y);
+        const b = worldToScreen(bottomRight.x, y);
+        line(a.x, a.y, b.x, b.y);
+      }
+    }
+
+    function draw() {
+      background(11, 15, 20);
+
+      drawGrid(100);
+
+      const ledWorld = computeAllLedWorldPositions();
+      const frame = computeFrameRGB(ledWorld);
+
+      // draw boards (circles)
+      const radius = CFG.board.diameter_mm / 2;
+
+      for (const b of CFG.boards) {
+        const sc = worldToScreen(b.x_mm, b.y_mm);
+        const rpx = radius * cam.zoom;
+
+        const isSel = (b.id === selectedBoardId);
+
+        // outer circle
+        noFill();
+        stroke(255,255,255, isSel ? 220 : 110);
+        strokeWeight(isSel ? 2 : 1.3);
+        circle(sc.x, sc.y, rpx * 2);
+
+        // ring guides (optional)
+        if (CFG.view && CFG.view.show_ring_guides) {
+          stroke(255,255,255, isSel ? 55 : 30);
+          strokeWeight(1);
+          for (const ring of CFG.ledRings) {
+            circle(sc.x, sc.y, (ring.diameter_mm/2) * 2 * cam.zoom);
+          }
+        }
+
+        // id label
+        noStroke();
+        fill(255,255,255, isSel ? 230 : 170);
+        textSize(12);
+        textAlign(CENTER, CENTER);
+        text(`B${b.id}`, sc.x, sc.y - rpx - 12);
+
+        // rotation indicator (a small line from center)
+        const rad = (b.rot_deg || 0) * Math.PI/180;
+        const dir = rot2d(radius, 0, rad); // local (+x) rotated
+        const end = worldToScreen(b.x_mm + dir.x, b.y_mm + dir.y);
+        stroke(255,255,255, isSel ? 170 : 90);
+        strokeWeight(2);
+        line(sc.x, sc.y, end.x, end.y);
+      }
+
+      // draw LEDs
+      noStroke();
+      for (let i=0; i<ledWorld.length; i++) {
+        const p = ledWorld[i];
+        const s = worldToScreen(p.x, p.y);
+
+        const r = frame[i*3+0], g = frame[i*3+1], b = frame[i*3+2];
+        fill(r, g, b, 235);
+
+        const dot = Math.max(2, 6 * cam.zoom);
+        circle(s.x, s.y, dot);
+      }
+
+      // draw ripple rings
+      for (const ev of ripples) {
+        const now = performance.now();
+        const t_s = (now - ev.t0_ms)/1000;
+        const r_mm = CFG.ripple.speed_mm_s * t_s;
+        const sc = worldToScreen(ev.x, ev.y);
+        noFill();
+        stroke(150, 210, 255, 80);
+        strokeWeight(1);
+        circle(sc.x, sc.y, r_mm * 2 * cam.zoom);
+      }
+
+      // HUD
+      const w = screenToWorld(mouseX, mouseY);
+      noStroke();
+      fill(255,255,255,160);
+      textSize(12);
+      textAlign(LEFT, BOTTOM);
+      const selText = (selectedBoardId == null) ? "-" : `B${selectedBoardId}`;
+      text(`mouse(mm): ${w.x.toFixed(1)}, ${w.y.toFixed(1)} | zoom:${cam.zoom.toFixed(2)} | sel:${selText} | ripples:${ripples.length}`, 12, height - 12);
+    }
+
+    function mousePressed() {
+      if (isOnUI()) return;
+
+      const w = screenToWorld(mouseX, mouseY);
+
+      const hit = hitTestBoard(w.x, w.y);
+
+      if (hit) {
+        selectedBoardId = hit.id;
+
+        dragMode = keyIsDown(SHIFT) ? "boardRotate" : "boardMove";
+        dragStart = { sx: mouseX, sy: mouseY, wx: w.x, wy: w.y };
+        boardStart = { x: hit.x_mm, y: hit.y_mm, rot: hit.rot_deg || 0 };
+
+      } else {
+        // empty click => ripple
+        if (mouseButton === LEFT) addRipple(w.x, w.y);
+
+        // pan start
+        dragMode = "pan";
+        dragging = true;
+        dragPrev = { x: mouseX, y: mouseY };
+      }
+    }
+
+    function mouseDragged() {
+      if (dragMode === "pan") {
+        const dx = mouseX - dragPrev.x;
+        const dy = mouseY - dragPrev.y;
+        cam.x += dx;
+        cam.y += dy;
+        dragPrev = { x: mouseX, y: mouseY };
+        return;
+      }
+
+      if (dragMode === "boardMove" || dragMode === "boardRotate") {
+        const b = CFG.boards.find(bb => bb.id === selectedBoardId);
+        if (!b) return;
+
+        const w = screenToWorld(mouseX, mouseY);
+
+        if (dragMode === "boardMove") {
+          const dx = w.x - dragStart.wx;
+          const dy = w.y - dragStart.wy;
+
+          let nx = boardStart.x + dx;
+          let ny = boardStart.y + dy;
+
+          if (!keyIsDown(ALT)) {
+            nx = snap(nx);
+            ny = snap(ny);
+          }
+
+          b.x_mm = nx;
+          b.y_mm = ny;
+
+        } else {
+          // rotate by horizontal drag (simple + intuitive)
+          const px = mouseX - dragStart.sx;
+          let nr = boardStart.rot + px * 0.3;
+
+          if (!keyIsDown(ALT)) {
+            nr = Math.round(nr / 15) * 15;
+          }
+
+          b.rot_deg = nr;
+        }
+      }
+    }
+
+    function mouseReleased() {
+      dragging = false;
+      dragMode = "none";
+    }
+
+    function mouseWheel(e) {
+      if (isOnUI()) return;
+
+      const before = screenToWorld(mouseX, mouseY);
+      const z = cam.zoom;
+      const factor = (e.deltaY > 0) ? 0.92 : 1.08;
+      cam.zoom = Math.max(0.08, Math.min(3.0, z * factor));
+      const after = screenToWorld(mouseX, mouseY);
+
+      cam.x += (after.x - before.x) * cam.zoom;
+      cam.y += (after.y - before.y) * cam.zoom;
+
+      return false;
+    }
+
+    function windowResized() {
+      resizeCanvas(window.innerWidth, window.innerHeight);
+    }
+
+    // =========================
+    // toast
+    // =========================
+    let toastTimer = null;
+    function toast(msg) {
+      const el = document.getElementById('toast');
+      el.textContent = msg;
+      el.classList.add('show');
+      if (toastTimer) clearTimeout(toastTimer);
+      toastTimer = setTimeout(() => el.classList.remove('show'), 1200);
+    }
+  </script>
+</body>
+</html>
