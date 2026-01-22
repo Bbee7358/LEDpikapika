@@ -1,154 +1,374 @@
+<!-- <!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WebSerial x Pico REPL Test</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 16px; }
+    button { margin-right: 8px; padding: 8px 12px; }
+    pre { background:#111; color:#0f0; padding:12px; border-radius:8px; height: 360px; overflow:auto; }
+    input { width: 520px; max-width: 100%; padding: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Web Serial API - Pico REPL 通信テスト</h1>
+
+  <div style="margin-bottom:12px;">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <button id="btnTest" disabled>Test: sys.version</button>
+  </div>
+
+  <div style="margin-bottom:12px;">
+    <input id="line" placeholder="任意のREPLコマンド（例: 1+2）" />
+    <button id="btnSend" disabled>Send</button>
+  </div>
+
+  <pre id="log"></pre>
+
+<script>
+let port = null;
+let reader = null;
+let writer = null;
+let readLoopRunning = false;
+
+const logEl = document.getElementById("log");
+const btnConnect = document.getElementById("btnConnect");
+const btnDisconnect = document.getElementById("btnDisconnect");
+const btnTest = document.getElementById("btnTest");
+const btnSend = document.getElementById("btnSend");
+const lineEl = document.getElementById("line");
+
+function log(s) {
+  logEl.textContent += s;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+async function waitForPrompt(timeoutMs = 4000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const t = logEl.textContent;
+    if (t.endsWith(">>> ") || t.endsWith(">>> \n")) return true;
+    await new Promise(r => setTimeout(r, 50));
+  }
+  return false;
+}
+
+async function startReadLoop() {
+  if (!port || !port.readable) return;
+  readLoopRunning = true;
+
+  reader = port.readable.getReader();
+  const decoder = new TextDecoder();
+
+  try {
+    while (port && port.readable) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) log(decoder.decode(value));
+    }
+  } catch (e) {
+    log(`\n[read error] ${e}\n`);
+  } finally {
+    try { reader.releaseLock(); } catch {}
+    reader = null;
+    readLoopRunning = false;
+  }
+}
+
+async function sendLine(s) {
+  if (!writer) return;
+  // REPLは改行で実行されるので \r\n を付ける
+  const data = new TextEncoder().encode(s + "\r\n");
+  await writer.write(data);
+}
+
+async function connect() {
+  if (!("serial" in navigator)) {
+    alert("このブラウザはWeb Serialに対応していません。Chrome/Edgeを使ってください。");
+    return;
+  }
+
+  // ユーザー操作でポート選択（Picoを選ぶ）
+  port = await navigator.serial.requestPort();
+
+  // Qiita記事と同様、REPL向けに 115200 でopen :contentReference[oaicite:3]{index=3}
+  await port.open({ baudRate: 115200 });
+
+  writer = port.writable.getWriter();
+
+  log("[connected]\n");
+
+  // 受信ループ開始
+  startReadLoop();
+
+  // REPLのプロンプトを待つ（>>>）
+  const ok = await waitForPrompt(5000);
+  if (!ok) {
+    log("\n[warn] REPLプロンプト(>>>)が見えません。Pico側で別プログラムが動いている可能性があります。\n");
+  }
+
+  btnConnect.disabled = true;
+  btnDisconnect.disabled = false;
+  btnTest.disabled = false;
+  btnSend.disabled = false;
+}
+
+async function disconnect() {
+  btnDisconnect.disabled = true;
+  btnTest.disabled = true;
+  btnSend.disabled = true;
+
+  try {
+    if (reader) {
+      await reader.cancel();
+      try { reader.releaseLock(); } catch {}
+      reader = null;
+    }
+    if (writer) {
+      await writer.close();
+      try { writer.releaseLock(); } catch {}
+      writer = null;
+    }
+    if (port && port.readable) {
+      try { await port.readable.cancel(); } catch {}
+    }
+    if (port) {
+      await port.close();
+      port = null;
+    }
+  } catch (e) {
+    log(`\n[disconnect error] ${e}\n`);
+  }
+
+  log("\n[disconnected]\n");
+  btnConnect.disabled = false;
+}
+
+btnConnect.addEventListener("click", connect);
+btnDisconnect.addEventListener("click", disconnect);
+
+btnTest.addEventListener("click", async () => {
+  // Qiita記事の動作確認と同じ: import sys → print(sys.version) :contentReference[oaicite:4]{index=4}
+  await sendLine("import sys");
+  await sendLine("print(sys.version)");
+});
+
+btnSend.addEventListener("click", async () => {
+  const s = lineEl.value.trim();
+  if (!s) return;
+  await sendLine(s);
+  lineEl.value = "";
+});
+</script>
+</body>
+</html> -->
+
+
+
+
+
+
+
+
+
 <!doctype html>
 <html lang="ja">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Pico Lチカ最小（WebSerial）</title>
-
+  <title>Pico WebSerial 疎通確認</title>
   <style>
-    body {
-      font-family: system-ui, sans-serif;
-      padding: 16px;
-    }
-    h1 {
-      margin-bottom: 12px;
-    }
-    button {
-      font-size: 16px;
-      padding: 10px 14px;
-      margin-right: 8px;
-      margin-bottom: 8px;
-    }
-    #log {
-      white-space: pre-wrap;
-      background: #f5f5f5;
-      padding: 12px;
-      border-radius: 8px;
-      margin-top: 12px;
-      height: 220px;
-      overflow-y: auto;
-      font-family: monospace;
-      font-size: 14px;
-    }
+    body { font-family: system-ui, -apple-system, sans-serif; margin: 16px; }
+    button { margin-right: 8px; margin-bottom: 8px; }
+    #log { white-space: pre-wrap; border: 1px solid #ccc; padding: 12px; height: 360px; overflow: auto; }
+    .row { margin-bottom: 10px; }
+    input { width: 320px; }
   </style>
 </head>
-
 <body>
-  <h1>Pico Lチカ最小（WebSerial）</h1>
+  <h1>Pico × Web Serial 疎通確認</h1>
 
-  <button id="connect">接続</button>
-  <button id="disconnect" disabled>切断</button>
-  <br/>
-  <button id="toggle" disabled>TOGGLE</button>
-  <button id="on" disabled>ON</button>
-  <button id="off" disabled>OFF</button>
+  <div class="row">
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+    <button id="btnCheck" disabled>疎通チェック（ping.py）</button>
+  </div>
+
+  <div class="row">
+    <input id="cmd" placeholder="任意コマンド（REPLへ送る）例: print(123)" />
+    <button id="btnSend" disabled>Send</button>
+  </div>
 
   <div id="log"></div>
 
-  <script>
-    let port = null;
-    let writer = null;
-    let reader = null;
+<script>
+let port = null;
+let reader = null;
+let writer = null;
+let readLoopAbort = false;
 
-    const logEl = document.getElementById("log");
+const logEl = document.getElementById("log");
+const btnConnect = document.getElementById("btnConnect");
+const btnDisconnect = document.getElementById("btnDisconnect");
+const btnCheck = document.getElementById("btnCheck");
+const btnSend = document.getElementById("btnSend");
+const cmdEl = document.getElementById("cmd");
 
-    const btnConnect = document.getElementById("connect");
-    const btnDisconnect = document.getElementById("disconnect");
-    const btnToggle = document.getElementById("toggle");
-    const btnOn = document.getElementById("on");
-    const btnOff = document.getElementById("off");
+function log(s) {
+  logEl.textContent += s;
+  logEl.scrollTop = logEl.scrollHeight;
+}
 
-    function log(msg) {
-      logEl.textContent += msg + "\n";
-      logEl.scrollTop = logEl.scrollHeight;
-    }
+function setUi(connected) {
+  btnConnect.disabled = connected;
+  btnDisconnect.disabled = !connected;
+  btnCheck.disabled = !connected;
+  btnSend.disabled = !connected;
+}
 
-    function setConnected(state) {
-      btnToggle.disabled = !state;
-      btnOn.disabled = !state;
-      btnOff.disabled = !state;
-      btnDisconnect.disabled = !state;
-    }
+async function connect() {
+  if (!("serial" in navigator)) {
+    alert("このブラウザはWeb Serial APIに対応していません。Chrome/Edgeで開いてください。");
+    return;
+  }
 
-    async function connect() {
-      if (!("serial" in navigator)) {
-        alert("このブラウザはWebSerial非対応です。Chrome/Edgeを使ってください。");
-        return;
-      }
+  // Picoを選択
+  port = await navigator.serial.requestPort();
+  await port.open({ baudRate: 115200 }); // PicoのREPLは通常115200 :contentReference[oaicite:2]{index=2}
 
-      try {
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 115200 });
+  writer = port.writable.getWriter();
+  reader = port.readable.getReader();
 
-        const textEncoder = new TextEncoderStream();
-        textEncoder.readable.pipeTo(port.writable);
-        writer = textEncoder.writable.getWriter();
+  readLoopAbort = false;
+  readLoop(); // 受信待ちループ開始
 
-        const textDecoder = new TextDecoderStream();
-        port.readable.pipeTo(textDecoder.writable);
-        reader = textDecoder.readable.getReader();
+  setUi(true);
+  log("[connected]\n");
 
-        log("CONNECTED");
-        setConnected(true);
+  // REPLプロンプト待ち（>>> が末尾に来るまで待つ） :contentReference[oaicite:3]{index=3}
+  await waitForPrompt(6000);
+  log("[REPL ready]\n");
+}
 
-        // Picoからのログを読む
-        (async () => {
-          try {
-            while (true) {
-              const { value, done } = await reader.read();
-              if (done) break;
-              if (value) log("PICO> " + value.trimEnd());
-            }
-          } catch (e) {
-            log("READ ERR: " + e);
-          }
-        })();
+async function disconnect() {
+  readLoopAbort = true;
 
-      } catch (e) {
-        log("CONNECT ERR: " + e);
-        setConnected(false);
-      }
-    }
-
-    async function disconnect() {
-      try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch(e){}
-      try { if (writer) { await writer.close(); writer.releaseLock(); } } catch(e){}
-      try { if (port) { await port.close(); } } catch(e){}
-
+  try {
+    if (reader) {
+      await reader.cancel();
+      reader.releaseLock();
       reader = null;
-      writer = null;
-      port = null;
-
-      log("DISCONNECTED");
-      setConnected(false);
     }
+    if (writer) {
+      await writer.close();
+      writer.releaseLock();
+      writer = null;
+    }
+    if (port) {
+      await port.close();
+      port = null;
+    }
+  } catch (e) {
+    log(`[disconnect error] ${e}\n`);
+  }
 
-    async function sendLine(line) {
-      if (!writer) {
-        log("NO CONNECTION");
+  setUi(false);
+  log("[disconnected]\n");
+}
+
+async function writeText(text) {
+  if (!writer) return;
+  const data = new TextEncoder().encode(text);
+  await writer.write(data);
+}
+
+async function sendLine(line) {
+  // REPL向け：改行は \r\n が無難
+  await writeText(line + "\r\n");
+}
+
+async function readLoop() {
+  const decoder = new TextDecoder();
+  try {
+    while (!readLoopAbort && port && port.readable) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) log(decoder.decode(value));
+    }
+  } catch (e) {
+    log(`[read error] ${e}\n`);
+  }
+}
+
+// ログ末尾が ">>> " になるのを待つ（Qiitaと同じ考え方） :contentReference[oaicite:4]{index=4}
+function waitForPrompt(timeoutMs = 5000) {
+  const start = Date.now();
+  return new Promise((resolve, reject) => {
+    const tick = () => {
+      const t = logEl.textContent;
+      if (t.endsWith(">>> ") || t.endsWith(">>> \n") || t.endsWith(">>> \r\n")) {
+        resolve();
         return;
       }
-      try {
-        await writer.write(line + "\n");
-        log("PC> " + line);
-      } catch (e) {
-        log("WRITE ERR: " + e);
+      if (Date.now() - start > timeoutMs) {
+        reject(new Error("REPL prompt timeout（>>> が見つかりません）"));
+        return;
       }
-    }
+      setTimeout(tick, 50);
+    };
+    tick();
+  });
+}
 
-    btnConnect.addEventListener("click", connect);
-    btnDisconnect.addEventListener("click", disconnect);
+async function check() {
+  log("\n[check start]\n");
 
-    btnToggle.addEventListener("click", () => sendLine("TOGGLE"));
-    btnOn.addEventListener("click", () => sendLine("ON"));
-    btnOff.addEventListener("click", () => sendLine("OFF"));
+  // もし何か走っててREPLが変になってたら止める（Ctrl-C）
+  await writeText("\x03");
+  await new Promise(r => setTimeout(r, 150));
+  await waitForPrompt(4000).catch(()=>{});
 
-    // ページ更新・終了時にクリーンに切断（ベストエフォート）
-    window.addEventListener("beforeunload", () => {
-      try { reader && reader.cancel(); } catch(e){}
-      try { writer && writer.close(); } catch(e){}
-      try { port && port.close(); } catch(e){}
-    });
-  </script>
+  // まずはバージョン表示（Qiitaの例に近い） :contentReference[oaicite:5]{index=5}
+  await sendLine("import sys");
+  await sendLine("print(sys.version)");
+  await waitForPrompt(6000);
+
+  // ping.py をimportして呼ぶ
+  await sendLine("import ping");
+  await sendLine("print(ping.ping('HELLO'))");
+  await waitForPrompt(6000);
+
+  // 追加：辞書をprint（通信がちゃんと崩れず表示できるか）
+  await sendLine("print(ping.info())");
+  await waitForPrompt(6000);
+
+  log("[check done]\n");
+}
+
+btnConnect.addEventListener("click", async () => {
+  try { await connect(); }
+  catch (e) { log(`[connect error] ${e}\n`); await disconnect(); }
+});
+
+btnDisconnect.addEventListener("click", async () => {
+  await disconnect();
+});
+
+btnCheck.addEventListener("click", async () => {
+  try { await check(); }
+  catch (e) { log(`[check error] ${e}\n`); }
+});
+
+btnSend.addEventListener("click", async () => {
+  const c = cmdEl.value.trim();
+  if (!c) return;
+  await sendLine(c);
+});
+
+setUi(false);
+log("1) Connect → 2) 疎通チェック を押してください。\n");
+</script>
 </body>
 </html>
