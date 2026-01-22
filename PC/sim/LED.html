@@ -3,924 +3,149 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>LED Board Simulator - Single File Clean Architecture</title>
+  <title>WebSerial Minimal - Connect/Disconnect/Receive</title>
   <style>
-    html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: ui-sans-serif, system-ui; }
-    #ui {
-      position: fixed; top: 12px; left: 12px; z-index: 10;
-      width: 440px; max-width: calc(100vw - 24px);
-      background: rgba(20, 28, 40, 0.92);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 12px; padding: 12px;
-      box-shadow: 0 10px 30px rgba(0,0,0,0.35);
-      backdrop-filter: blur(8px);
+    html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #ui { padding: 14px; display:flex; gap:10px; align-items:center; }
+    button {
+      padding: 10px 14px; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.06); color:#e8eef7; cursor:pointer;
     }
-    #ui h1 { margin:0 0 8px; font-size: 14px; font-weight: 700; letter-spacing: .02em; }
-    #ui .row { display:flex; gap:8px; margin: 8px 0; }
-    #ui button {
-      flex:1; padding: 8px 10px; border-radius: 10px;
+    button:disabled { opacity:.45; cursor:not-allowed; }
+    #status { opacity:.9; font-size: 13px; }
+    #log {
+      width: calc(100% - 28px);
+      height: calc(100% - 70px);
+      margin: 0 14px 14px;
+      border-radius: 12px;
       border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(255,255,255,0.06); color:#e8eef7;
-      cursor: pointer;
-    }
-    #ui button:hover { background: rgba(255,255,255,0.10); }
-    #ui button:disabled { opacity: .45; cursor: not-allowed; }
-    #ui textarea {
-      width:100%; height: 210px; resize: vertical;
-      border-radius: 10px; padding: 10px;
-      border: 1px solid rgba(255,255,255,0.12);
-      background: rgba(0,0,0,0.20); color:#e8eef7;
+      background: rgba(0,0,0,0.25);
+      padding: 10px;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-      font-size: 11px; line-height: 1.35;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
     }
-    #ui .hint { font-size: 11px; opacity: .92; line-height: 1.55; }
-    #ui .tag { display:inline-block; padding:2px 8px; border-radius:999px; border:1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.06); }
-    #toast {
-      position: fixed; bottom: 12px; left: 12px; z-index: 20;
-      background: rgba(20, 28, 40, 0.92); border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 10px; padding: 8px 10px; font-size: 12px; opacity: 0;
-      transform: translateY(8px); transition: .2s;
-    }
-    #toast.show { opacity: 1; transform: translateY(0px); }
   </style>
 </head>
 <body>
   <div id="ui">
-    <h1>LED Board Simulator (1-file / structured)</h1>
-    <div class="hint">
-      <span class="tag">基板</span> クリックで選択 / ドラッグで移動（10mmスナップ, Altで無効） / Shift+ドラッグで回転（15°, Altで無効）<br>
-      <span class="tag">空白</span> 左クリックでイベント / ドラッグでパン / ホイールでズーム<br>
-      <span class="tag">Effect</span> 1 Ripple / 2 OrbitPulse / 3 SweepLine / 4 NoiseSparkle
-      <br><br>
-      LED番号規則：外周92mm 0..29(0° CCW) / 中34mm 30..41(15° CCW) / 内18mm 42..47(0° CCW)
-      <br>
-      <span class="tag">保存</span> 配置や設定は自動保存（localStorage）。次回起動で復元。
-      <br>
-      <span class="tag">Pico</span> ConnectでWebSerial接続（Chrome推奨 / MicroPicoは切断してから）
-    </div>
-
-    <!-- 送信系 -->
-    <div class="row">
-      <button id="connect">Connect Pico</button>
-      <button id="disconnect" disabled>Disconnect</button>
-    </div>
-    <button id="testWhite">Test White</button>
-
-
-    <!-- 既存 -->
-    <div class="row">
-      <button id="apply">Apply</button>
-      <button id="export">Export</button>
-      <button id="clearEvents">Events Clear</button>
-    </div>
-
-    <textarea id="config"></textarea>
-
-    <div class="row">
-      <button id="resetView">Reset View</button>
-      <button id="resetBoards">Reset Boards</button>
-    </div>
-
-    <div class="hint" id="effectInfo"></div>
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+    <span id="status">serial: OFF</span>
   </div>
+  <div id="log"></div>
 
-  <div id="toast"></div>
-
-  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
   <script>
-    // ============================================================
-    // WebSerial (Browser -> Pico)
-    // ============================================================
-    let serialPort = null;
-    let serialWriter = null;
-    let serialConnected = false;
+    let port = null;
 
-    async function serialConnect(){
-      console.log("UA:", navigator.userAgent);
-      console.log("hasSerial:", "serial" in navigator, navigator.serial);
+    // readableから読む用
+    let reader = null;
+    let textDecoder = null;
 
+    // 受信バッファ（行単位で整形したい時に使う）
+    let rxBuf = "";
+
+    const $connect = document.getElementById("connect");
+    const $disconnect = document.getElementById("disconnect");
+    const $status = document.getElementById("status");
+    const $log = document.getElementById("log");
+
+    function setStatus(on){
+      $connect.disabled = on;
+      $disconnect.disabled = !on;
+      $status.textContent = on ? "serial: ON" : "serial: OFF";
+    }
+
+    function logLine(s){
+      $log.textContent += s + "\n";
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    async function connect(){
       if (!("serial" in navigator)) {
-        UI.toast("WebSerial非対応。Chromeで開いてください。");
+        alert("WebSerial非対応です。Chromeで開いてください。");
         return;
       }
-      if (serialConnected) {
-        UI.toast("Already connected.");
-        return;
-      }
+      if (port) return;
 
-      // requestPort() はユーザー操作（ボタンクリック）内で呼ぶ必要あり
-      serialPort = await navigator.serial.requestPort();
-      await serialPort.open({ baudRate: 115200 }); // MicroPython側は実質無視でもOK
+      // ユーザー操作内で必須
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
 
-      serialWriter = serialPort.writable.getWriter();
-      serialConnected = true;
+      setStatus(true);
+      logLine("[connected]");
 
-      UI.updateSerialButtons();
-      UI.toast("Serial connected.");
-    }
+      // 受信開始：TextDecoderStream で bytes -> text
+      textDecoder = new TextDecoderStream();
+      const readableClosed = port.readable.pipeTo(textDecoder.writable);
 
-    async function serialDisconnect(){
-      try {
-        if (serialWriter) {
-          await serialWriter.releaseLock();
-        }
-      } catch (e) {
-        console.warn("releaseLock failed:", e);
-      }
-      try {
-        if (serialPort) {
-          await serialPort.close();
-        }
-      } catch (e) {
-        console.warn("port close failed:", e);
-      }
+      reader = textDecoder.readable.getReader();
 
-      serialWriter = null;
-      serialPort = null;
-      serialConnected = false;
-
-      UI.updateSerialButtons();
-      UI.toast("Serial disconnected.");
-    }
-
-    // ============================================================
-    // 0) CONFIG (single source of truth)
-    // ============================================================
-    const DEFAULT_CONFIG = {
-      world: { width_mm: 2400, height_mm: 1400 },
-      board: { diameter_mm: 100 },
-
-      // LED index mapping (your numbering)
-      ledMapping: {
-        outer: { diameter_mm: 92, count: 30, start_deg: 0,  index_from: 0  },  // 0..29
-        mid:   { diameter_mm: 34, count: 12, start_deg: 15, index_from: 30 },  // 30..41
-        inner: { diameter_mm: 18, count: 6,  start_deg: 0,  index_from: 42 }   // 42..47
-      },
-
-      boards: Array.from({length: 10}).map((_, i) => ({
-        id: i,
-        x_mm: 300 + (i%5)*220,
-        y_mm: 280 + Math.floor(i/5)*320,
-        rot_deg: 0
-      })),
-
-      view: {
-        show_ring_guides: true,
-        show_index_labels: false
-      },
-
-      effects: {
-        ripple: { speed_mm_s: 650, ring_width_mm: 55, decay_s: 2.0 },
-        orbitPulse: { angular_deg_s: 120, band_deg: 18, decay_s: 1.2 },
-        sweepLine: { period_s: 3.5, line_width_mm: 60, decay_s: 1.0 },
-        noiseSparkle: { density: 0.08, decay_s: 0.35 }
-      },
-
-      runtime: {
-        max_events: 30,
-        gamma: 1.8,
-        dot_base_px: 6,
-        send_fps: 30
-      }
-    };
-
-    let CFG = structuredClone(DEFAULT_CONFIG);
-
-    // ============================================================
-    // Persistence (localStorage)
-    // ============================================================
-    const STORAGE_KEY = "led_board_sim_cfg_v1";
-
-    function saveCFG(){
-      try {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(CFG));
-      } catch (e) {
-        console.warn("saveCFG failed:", e);
-      }
-    }
-
-    function loadCFG(){
-      try {
-        const txt = localStorage.getItem(STORAGE_KEY);
-        if (!txt) return false;
-
-        const parsed = JSON.parse(txt);
-        if (!parsed?.boards || parsed.boards.length !== 10) return false;
-
-        // send_fps が古いCFGに無い場合もあるので補完
-        if (!parsed.runtime) parsed.runtime = {};
-        if (typeof parsed.runtime.send_fps !== "number") parsed.runtime.send_fps = DEFAULT_CONFIG.runtime.send_fps;
-
-        CFG = parsed;
-        return true;
-      } catch (e) {
-        console.warn("loadCFG failed:", e);
-        return false;
-      }
-    }
-
-    // ============================================================
-    // 1) CORE UTILS (pure functions)
-    // ============================================================
-    const Util = {
-      clamp01(v){ return Math.max(0, Math.min(1, v)); },
-      polarToXY(radius_mm, deg){
-        const th = deg * Math.PI / 180;
-        // 0° right, CCW positive. Screen Y is down -> invert sin.
-        return { x: radius_mm * Math.cos(th), y: radius_mm * -Math.sin(th) };
-      },
-      rot2d(x, y, rad){
-        const cs = Math.cos(rad), sn = Math.sin(rad);
-        return { x: x*cs - y*sn, y: x*sn + y*cs };
-      },
-      hsvToRgb(h, s, v){
-        h = ((h % 360) + 360) % 360;
-        const c = v * s;
-        const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
-        const m = v - c;
-        let rp=0,gp=0,bp=0;
-        if (h < 60)      { rp=c; gp=x; bp=0; }
-        else if (h < 120){ rp=x; gp=c; bp=0; }
-        else if (h < 180){ rp=0; gp=c; bp=x; }
-        else if (h < 240){ rp=0; gp=x; bp=c; }
-        else if (h < 300){ rp=x; gp=0; bp=c; }
-        else             { rp=c; gp=0; bp=x; }
-        return { r: (rp+m), g: (gp+m), b: (bp+m) };
-      }
-    };
-
-    // ============================================================
-    // 2) GEOMETRY (board & LED positions)
-    // ============================================================
-    const Geometry = {
-      // 48 points in board-local coords (center=0,0), index = LED number 0..47
-      ledLocalByIndex(){
-        const pts = new Array(48).fill(null);
-        const map = CFG.ledMapping;
-
-        const rings = [
-          { name: "outer", ...map.outer },
-          { name: "mid",   ...map.mid   },
-          { name: "inner", ...map.inner }
-        ];
-
-        for (const ring of rings) {
-          const r = ring.diameter_mm / 2;
-          for (let i=0; i<ring.count; i++){
-            const deg = ring.start_deg + i * (360 / ring.count);
-            const idx = ring.index_from + i;
-            pts[idx] = { ...Util.polarToXY(r, deg), ringName: ring.name, localDeg: deg };
+      // 読みループ（切断されるまで回る）
+      (async () => {
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) onText(value);
           }
+        } catch (e) {
+          logLine("[read error] " + e.message);
+        } finally {
+          try { reader?.releaseLock(); } catch {}
+          reader = null;
         }
-        for (let i=0; i<48; i++) if (!pts[i]) pts[i] = { x:0, y:0, ringName:"missing", localDeg:0 };
-        return pts;
-      },
+      })();
 
-      // 480 LEDs in world coords: board0 idx0..47, board1 idx0..47, ...
-      ledWorld(){
-        const local = this.ledLocalByIndex();
-        const out = [];
-
-        for (const b of CFG.boards){
-          const rad = (b.rot_deg || 0) * Math.PI/180;
-
-          for (let idx=0; idx<48; idx++){
-            const p = local[idx];
-            const rp = Util.rot2d(p.x, p.y, rad);
-
-            // worldDeg: angle of LED around board center (0° right, CCW)
-            const worldDeg = (Math.atan2(-rp.y, rp.x) * 180 / Math.PI + 360) % 360;
-
-            out.push({
-              x: b.x_mm + rp.x,
-              y: b.y_mm + rp.y,
-              boardId: b.id,
-              ledIndex: idx,
-              ringName: p.ringName,
-              worldDeg
-            });
-          }
-        }
-        return out;
-      }
-    };
-
-    // ============================================================
-    // 3) EFFECTS (state machine)
-    // ============================================================
-    class BaseEffect {
-      constructor(id, name){ this.id=id; this.name=name; }
-      onEnter(){ }
-      onExit(){ }
-      onEvent(wx, wy){ }
-      clear(){ }
-      intensity(led, nowMs){ return 0; }
-      color(led, a){
-        const hue = 205 + (led.x + led.y) * 0.005;
-        return Util.hsvToRgb(hue, 0.85, a);
-      }
-      info(){ return ""; }
+      // ここで readableClosed を await しない（ログ用途なので）
+      readableClosed.catch(() => {});
     }
 
-    let events = []; // {x,y,t0_ms}
-
-    class RippleEffect extends BaseEffect {
-      constructor(){ super("ripple","Ripple"); }
-      onEvent(wx, wy){
-        events.push({ x: wx, y: wy, t0_ms: performance.now() });
-        while (events.length > CFG.runtime.max_events) events.shift();
+    function onText(txt){
+      // MicroPythonのprintはだいたい \r\n なので行単位に整形
+      rxBuf += txt;
+      const lines = rxBuf.split(/\r?\n/);
+      rxBuf = lines.pop(); // 最後の未確定行は次回へ
+      for (const line of lines) {
+        if (line.length) logLine(line);
       }
-      clear(){ events = []; }
-      intensity(led, nowMs){
-        const cfg = CFG.effects.ripple;
-        let a = 0;
-        for (const ev of events){
-          const t = (nowMs - ev.t0_ms)/1000;
-          if (t < 0) continue;
-          const d = Math.hypot(led.x - ev.x, led.y - ev.y);
-          const r = cfg.speed_mm_s * t;
-          const w = cfg.ring_width_mm;
-          const ring = Math.exp(-((d - r)*(d - r)) / (2*w*w));
-          const life = Math.exp(-t / cfg.decay_s);
-          a += ring * life;
-        }
-        return Util.clamp01(a);
-      }
-      info(){ return "クリックで波紋中心追加。距離×時間で輪が広がる。"; }
     }
 
-    class OrbitPulseEffect extends BaseEffect {
-      constructor(){ super("orbitPulse","OrbitPulse"); }
-      onEvent(wx, wy){
-        events.push({ x: wx, y: wy, t0_ms: performance.now() });
-        while (events.length > 10) events.shift();
-      }
-      clear(){ events = []; }
-      intensity(led, nowMs){
-        const cfg = CFG.effects.orbitPulse;
-        const t = nowMs/1000;
-        const phase = (t * cfg.angular_deg_s) % 360;
+    async function disconnect(){
+      if (!port) return;
 
-        let d = Math.abs(((led.worldDeg - phase + 540) % 360) - 180);
-        const core = Math.exp(-(d*d) / (2*cfg.band_deg*cfg.band_deg));
+      logLine("[disconnecting]");
 
-        let accent = 0;
-        for (const ev of events){
-          const dt = (nowMs - ev.t0_ms)/1000;
-          if (dt < 0) continue;
-          const life = Math.exp(-dt / cfg.decay_s);
-          const dist = Math.hypot(led.x - ev.x, led.y - ev.y);
-          accent += Math.exp(-(dist*dist)/(2*120*120)) * life;
-        }
-        return Util.clamp01(core*0.85 + accent*0.8);
-      }
-      color(led, a){
-        const hue = (led.worldDeg + 200) % 360;
-        return Util.hsvToRgb(hue, 0.9, a);
-      }
-      info(){ return "角度に沿ってパルスが回転。クリックで局所アクセント。"; }
+      try { await reader?.cancel(); } catch {}
+      try { reader?.releaseLock(); } catch {}
+      reader = null;
+
+      try { await port.close(); } catch {}
+      port = null;
+      textDecoder = null;
+
+      setStatus(false);
+      logLine("[disconnected]");
     }
 
-    class SweepLineEffect extends BaseEffect {
-      constructor(){ super("sweepLine","SweepLine"); }
-      onEvent(wx, wy){
-        events.push({ x: wx, y: wy, t0_ms: performance.now() });
-        while (events.length > 10) events.shift();
-      }
-      clear(){ events = []; }
-      intensity(led, nowMs){
-        const cfg = CFG.effects.sweepLine;
-        const t = (nowMs/1000) % cfg.period_s;
-        const u = t / cfg.period_s;
-
-        const w = CFG.world.width_mm;
-        const pos = (u < 0.5) ? (u*2)*w : (1 - (u-0.5)*2)*w;
-
-        const d = Math.abs(led.x - pos);
-        const core = Math.exp(-(d*d) / (2*cfg.line_width_mm*cfg.line_width_mm));
-
-        let accent = 0;
-        for (const ev of events){
-          const dt = (nowMs - ev.t0_ms)/1000;
-          if (dt < 0) continue;
-          const life = Math.exp(-dt / cfg.decay_s);
-          const dist = Math.hypot(led.x - ev.x, led.y - ev.y);
-          accent += Math.exp(-(dist*dist)/(2*140*140)) * life;
-        }
-        return Util.clamp01(core*0.9 + accent*0.8);
-      }
-      color(led, a){
-        return Util.hsvToRgb(180, 0.65, a);
-      }
-      info(){ return "X方向に走査線が往復。クリックで局所アクセント。"; }
-    }
-
-    class NoiseSparkleEffect extends BaseEffect {
-      constructor(){ super("noiseSparkle","NoiseSparkle"); }
-      onEvent(wx, wy){
-        events.push({ x: wx, y: wy, t0_ms: performance.now() });
-        while (events.length > 20) events.shift();
-      }
-      clear(){ events = []; }
-      intensity(led, nowMs){
-        const cfg = CFG.effects.noiseSparkle;
-        const tick = Math.floor(nowMs / 60);
-
-        let x = (led.ledIndex + led.boardId*97 + tick*131) >>> 0;
-        x ^= x << 13; x ^= x >>> 17; x ^= x << 5;
-        const rnd = ((x >>> 0) % 10000) / 10000;
-
-        let a = (rnd < cfg.density) ? 1.0 : 0.0;
-
-        for (const ev of events){
-          const dt = (nowMs - ev.t0_ms)/1000;
-          if (dt < 0) continue;
-          const life = Math.exp(-dt / cfg.decay_s);
-          const dist = Math.hypot(led.x - ev.x, led.y - ev.y);
-          const boost = Math.exp(-(dist*dist)/(2*160*160)) * life;
-          a = Util.clamp01(a + boost);
-        }
-        return a;
-      }
-      color(led, a){
-        return Util.hsvToRgb(280, 0.85, a);
-      }
-      info(){ return "ランダム瞬き。クリック周辺だけ一時的に密度UP。"; }
-    }
-
-    const Effects = {
-      map: {},
-      currentId: "ripple",
-      register(effect){ this.map[effect.id] = effect; },
-      current(){ return this.map[this.currentId]; },
-      set(id){
-        if (!this.map[id]) return;
-        if (this.currentId === id) return;
-        this.current()?.onExit?.();
-        this.currentId = id;
-        this.current()?.onEnter?.();
-        UI.toast(`Effect: ${this.current().name}`);
-        UI.updateEffectInfo();
-      }
+    // UI
+    $connect.onclick = async () => {
+      try { await connect(); }
+      catch (e) { logLine("[connect failed] " + e.message); await disconnect(); }
     };
+    $disconnect.onclick = async () => { await disconnect(); };
 
-    Effects.register(new RippleEffect());
-    Effects.register(new OrbitPulseEffect());
-    Effects.register(new SweepLineEffect());
-    Effects.register(new NoiseSparkleEffect());
-
-    // ============================================================
-    // 4) OUTPUTS (draw + send)
-    // ============================================================
-    const Outputs = {
-      drawScene(ledWorld, frame){
-        background(11, 15, 20);
-        this.drawGrid(100);
-        this.drawBoards();
-        this.drawLeds(ledWorld, frame);
-        this.drawHud();
-      },
-
-      drawGrid(step=100){
-        stroke(255, 255, 255, 18);
-        strokeWeight(1);
-        noFill();
-
-        const topLeft = Input.screenToWorld(0,0);
-        const bottomRight = Input.screenToWorld(width,height);
-
-        const x0 = Math.floor(topLeft.x / step) * step;
-        const y0 = Math.floor(topLeft.y / step) * step;
-
-        for (let x = x0; x < bottomRight.x + step; x += step) {
-          const a = Input.worldToScreen(x, topLeft.y);
-          const b = Input.worldToScreen(x, bottomRight.y);
-          line(a.x, a.y, b.x, b.y);
-        }
-        for (let y = y0; y < bottomRight.y + step; y += step) {
-          const a = Input.worldToScreen(topLeft.x, y);
-          const b = Input.worldToScreen(bottomRight.x, y);
-          line(a.x, a.y, b.x, b.y);
-        }
-
-        const labelPx = 14;
-        const tickPx = 6;
-
-        fill(255,255,255,120);
-        textSize(11);
-
-        textAlign(CENTER, TOP);
-        for (let x = x0; x < bottomRight.x + step; x += step) {
-          const s = Input.worldToScreen(x, topLeft.y);
-          stroke(255,255,255,80);
-          strokeWeight(1);
-          line(s.x, 0, s.x, tickPx);
-          noStroke();
-          if (Input.cam.zoom > 0.18) text(`${Math.round(x)}`, s.x, labelPx);
-        }
-
-        textAlign(LEFT, CENTER);
-        for (let y = y0; y < bottomRight.y + step; y += step) {
-          const s = Input.worldToScreen(topLeft.x, y);
-          stroke(255,255,255,80);
-          strokeWeight(1);
-          line(0, s.y, tickPx, s.y);
-          noStroke();
-          if (Input.cam.zoom > 0.18) text(`${Math.round(y)}`, labelPx, s.y);
-        }
-      },
-
-      drawBoards(){
-        const radius = CFG.board.diameter_mm / 2;
-
-        for (const b of CFG.boards) {
-          const sc = Input.worldToScreen(b.x_mm, b.y_mm);
-          const rpx = radius * Input.cam.zoom;
-          const isSel = (b.id === Input.selectedBoardId);
-
-          noFill();
-          stroke(255,255,255, isSel ? 220 : 110);
-          strokeWeight(isSel ? 2 : 1.3);
-          circle(sc.x, sc.y, rpx * 2);
-
-          if (CFG.view?.show_ring_guides) {
-            stroke(255,255,255, isSel ? 60 : 30);
-            strokeWeight(1);
-            const map = CFG.ledMapping;
-            circle(sc.x, sc.y, map.outer.diameter_mm * Input.cam.zoom);
-            circle(sc.x, sc.y, map.mid.diameter_mm   * Input.cam.zoom);
-            circle(sc.x, sc.y, map.inner.diameter_mm * Input.cam.zoom);
-          }
-
-          noStroke();
-          fill(255,255,255, isSel ? 235 : 170);
-          textSize(12);
-          textAlign(CENTER, CENTER);
-          text(`B${b.id}`, sc.x, sc.y - rpx - 12);
-
-          const rad = (b.rot_deg || 0) * Math.PI/180;
-          const dir = Util.rot2d(radius, 0, rad);
-          const end = Input.worldToScreen(b.x_mm + dir.x, b.y_mm + dir.y);
-          stroke(255,255,255, isSel ? 170 : 90);
-          strokeWeight(2);
-          line(sc.x, sc.y, end.x, end.y);
-        }
-      },
-
-      drawLeds(ledWorld, frame){
-        const showLabels = CFG.view?.show_index_labels;
-        noStroke();
-
-        for (let i=0; i<ledWorld.length; i++){
-          const led = ledWorld[i];
-          const s = Input.worldToScreen(led.x, led.y);
-
-          const r = frame[i*3+0], g = frame[i*3+1], b = frame[i*3+2];
-          fill(r, g, b, 235);
-
-          const dot = Math.max(2, CFG.runtime.dot_base_px * Input.cam.zoom);
-          circle(s.x, s.y, dot);
-
-          if (showLabels && Input.cam.zoom > 0.8){
-            fill(255,255,255,180);
-            textSize(10);
-            textAlign(CENTER, CENTER);
-            text(String(led.ledIndex), s.x, s.y - 10);
-          }
-        }
-      },
-
-      drawHud(){
-        const w = Input.screenToWorld(mouseX, mouseY);
-        noStroke();
-        fill(255,255,255,160);
-        textSize(12);
-        textAlign(LEFT, BOTTOM);
-        const selText = (Input.selectedBoardId == null) ? "-" : `B${Input.selectedBoardId}`;
-        const ser = serialConnected ? "serial:ON" : "serial:OFF";
-        text(`effect:${Effects.current().name} | ${ser} | mouse(mm): ${w.x.toFixed(1)},${w.y.toFixed(1)} | zoom:${Input.cam.zoom.toFixed(2)} | sel:${selText}`, 12, height - 12);
-      },
-
-      // --- Send (WebSerial) ---
-      sendFrame(frame){
-        if (!serialWriter || !serialConnected) return;
-        // 480*3=1440 bytes をそのまま送る
-        // Promiseは待たない（30fps制限で詰まりにくくする）
-        serialWriter.write(frame).catch((e)=>{
-          console.warn("serial write failed:", e);
-          UI.toast("Serial write failed");
-          serialDisconnect();
-        });
-      }
-    };
-
-    // ============================================================
-    // 5) INPUT (mouse/keyboard + camera + selection)
-    // ============================================================
-    const Input = {
-      cam: { x:0, y:0, zoom:0.45 },
-      selectedBoardId: null,
-      dragMode: "none",
-      dragPrev: { x:0, y:0 },
-      dragStart: { sx:0, sy:0, wx:0, wy:0 },
-      boardStart: { x:0, y:0, rot:0 },
-
-      worldToScreen(wx, wy){ return { x: wx * this.cam.zoom + this.cam.x, y: wy * this.cam.zoom + this.cam.y }; },
-      screenToWorld(sx, sy){ return { x: (sx - this.cam.x) / this.cam.zoom, y: (sy - this.cam.y) / this.cam.zoom }; },
-
-      resetView(){
-        this.cam.zoom = 0.45;
-        this.cam.x = width/2 - (CFG.world.width_mm/2) * this.cam.zoom;
-        this.cam.y = height/2 - (CFG.world.height_mm/2) * this.cam.zoom;
-      },
-
-      isOnUI(){
-        const ui = document.getElementById('ui');
-        const rect = ui.getBoundingClientRect();
-        return (mouseX >= rect.left && mouseX <= rect.right && mouseY >= rect.top && mouseY <= rect.bottom);
-      },
-
-      hitTestBoard(wx, wy){
-        const radius = CFG.board.diameter_mm / 2;
-        for (let i = CFG.boards.length - 1; i >= 0; i--) {
-          const b = CFG.boards[i];
-          if (Math.hypot(wx - b.x_mm, wy - b.y_mm) <= radius) return b;
-        }
-        return null;
-      },
-
-      snapMm(v){ return Math.round(v / 10) * 10; },
-
-      mousePressed(){
-        if (this.isOnUI()) return;
-
-        const w = this.screenToWorld(mouseX, mouseY);
-        const hit = this.hitTestBoard(w.x, w.y);
-
-        if (hit) {
-          this.selectedBoardId = hit.id;
-          this.dragMode = keyIsDown(SHIFT) ? "boardRotate" : "boardMove";
-          this.dragStart = { sx: mouseX, sy: mouseY, wx: w.x, wy: w.y };
-          this.boardStart = { x: hit.x_mm, y: hit.y_mm, rot: hit.rot_deg || 0 };
-        } else {
-          Effects.current().onEvent?.(w.x, w.y);
-          this.dragMode = "pan";
-          this.dragPrev = { x: mouseX, y: mouseY };
-        }
-      },
-
-      mouseDragged(){
-        if (this.dragMode === "pan") {
-          const dx = mouseX - this.dragPrev.x;
-          const dy = mouseY - this.dragPrev.y;
-          this.cam.x += dx;
-          this.cam.y += dy;
-          this.dragPrev = { x: mouseX, y: mouseY };
-          return;
-        }
-
-        if (this.dragMode === "boardMove" || this.dragMode === "boardRotate") {
-          const b = CFG.boards.find(bb => bb.id === this.selectedBoardId);
-          if (!b) return;
-
-          const w = this.screenToWorld(mouseX, mouseY);
-
-          if (this.dragMode === "boardMove") {
-            const dx = w.x - this.dragStart.wx;
-            const dy = w.y - this.dragStart.wy;
-
-            let nx = this.boardStart.x + dx;
-            let ny = this.boardStart.y + dy;
-
-            if (!keyIsDown(ALT)) { nx = this.snapMm(nx); ny = this.snapMm(ny); }
-
-            b.x_mm = nx; b.y_mm = ny;
-          } else {
-            const px = mouseX - this.dragStart.sx;
-            let nr = this.boardStart.rot + px * 0.3;
-            if (!keyIsDown(ALT)) nr = Math.round(nr / 15) * 15;
-            b.rot_deg = nr;
-          }
-        }
-      },
-
-      mouseReleased(){
-        if (this.dragMode === "boardMove" || this.dragMode === "boardRotate") {
-          saveCFG();
-          UI.syncTextarea();
-          UI.toast("Saved.");
-        }
-        this.dragMode = "none";
-      },
-
-      mouseWheel(e){
-        if (this.isOnUI()) return;
-
-        const before = this.screenToWorld(mouseX, mouseY);
-        const factor = (e.deltaY > 0) ? 0.92 : 1.08;
-
-        this.cam.zoom = Math.max(0.08, Math.min(3.0, this.cam.zoom * factor));
-
-        const after = this.screenToWorld(mouseX, mouseY);
-        this.cam.x += (after.x - before.x) * this.cam.zoom;
-        this.cam.y += (after.y - before.y) * this.cam.zoom;
-
-        return false;
-      },
-
-      keyPressed(){
-        if (key === '1') Effects.set('ripple');
-        if (key === '2') Effects.set('orbitPulse');
-        if (key === '3') Effects.set('sweepLine');
-        if (key === '4') Effects.set('noiseSparkle');
-      }
-    };
-
-    // ============================================================
-    // 6) UI helpers (apply/export/toast)
-    // ============================================================
-    const UI = {
-      ta: null,
-      _timer: null,
-
-      init(){
-        this.ta = document.getElementById("config");
-        this.ta.value = JSON.stringify(CFG, null, 2);
-
-        document.getElementById('testWhite').onclick = async () => {
-          if (!serialWriter) { UI.toast("Not connected"); return; }
-          const frame = new Uint8Array(480*3);
-          for (let i=0; i<480; i++){
-            frame[i*3+0] = 255;
-            frame[i*3+1] = 255;
-            frame[i*3+2] = 255;
-          }
-          serialWriter.write(frame);
-          UI.toast("Sent WHITE frame");
-        };
-
-        // serial buttons
-        document.getElementById('connect').onclick = async () => {
-          try { await serialConnect(); }
-          catch (e) { this.toast("Connect failed: " + e.message); }
-        };
-        document.getElementById('disconnect').onclick = async () => {
-          await serialDisconnect();
-        };
-        this.updateSerialButtons();
-
-        document.getElementById('apply').onclick = () => {
-          try {
-            const parsed = JSON.parse(this.ta.value);
-            if (!parsed.boards || parsed.boards.length !== 10) throw new Error("boards は10台必要");
-            CFG = parsed;
-
-            // 互換補完
-            if (!CFG.runtime) CFG.runtime = {};
-            if (typeof CFG.runtime.send_fps !== "number") CFG.runtime.send_fps = DEFAULT_CONFIG.runtime.send_fps;
-
-            saveCFG();
-            this.toast("Applied & saved.");
-            this.updateEffectInfo();
-          } catch (e) {
-            this.toast("JSON error: " + e.message);
-          }
-        };
-
-        document.getElementById('export').onclick = async () => {
-          const txt = JSON.stringify(CFG, null, 2);
-          try { await navigator.clipboard.writeText(txt); this.toast("Config copied."); }
-          catch { this.toast("Clipboard failed."); }
-        };
-
-        document.getElementById('clearEvents').onclick = () => {
-          Effects.current().clear?.();
-          events = [];
-          this.toast("Events cleared.");
-        };
-
-        document.getElementById('resetView').onclick = () => {
-          Input.resetView();
-          this.toast("View reset.");
-        };
-
-        document.getElementById('resetBoards').onclick = () => {
-          CFG = structuredClone(DEFAULT_CONFIG);
-          this.ta.value = JSON.stringify(CFG, null, 2);
-          Input.selectedBoardId = null;
-          saveCFG();
-          this.toast("Boards reset & saved.");
-          this.updateEffectInfo();
-        };
-
-        this.updateEffectInfo();
-      },
-
-      updateSerialButtons(){
-        const c = document.getElementById('connect');
-        const d = document.getElementById('disconnect');
-        c.disabled = serialConnected;
-        d.disabled = !serialConnected;
-      },
-
-      syncTextarea(){
-        if (!this.ta) return;
-        this.ta.value = JSON.stringify(CFG, null, 2);
-      },
-
-      updateEffectInfo(){
-        const e = Effects.current();
-        document.getElementById("effectInfo").textContent =
-          `現在: ${e.name} / ${e.info()}（追加する時はEffectを1クラス足すだけ）`;
-      },
-
-      toast(msg){
-        const el = document.getElementById('toast');
-        el.textContent = msg;
-        el.classList.add('show');
-        if (this._timer) clearTimeout(this._timer);
-        this._timer = setTimeout(() => el.classList.remove('show'), 1200);
-      }
-    };
-
-    // ============================================================
-    // 7) APP (one-frame pipeline)
-    // ============================================================
-    const App = {
-      ledWorld: [],
-      frame: null,
-      lastSendMs: 0,
-
-      setup(){
-        createCanvas(window.innerWidth, window.innerHeight);
-
-        const loaded = loadCFG();
-        Input.resetView();
-        UI.init();
-
-        if (loaded) {
-          UI.ta.value = JSON.stringify(CFG, null, 2);
-          UI.toast("Loaded saved layout.");
-        }
-      },
-
-      update(){
-        const nowMs = performance.now();
-
-        this.ledWorld = Geometry.ledWorld();
-        this.frame = this.computeFrame(this.ledWorld, nowMs);
-
-        Outputs.drawScene(this.ledWorld, this.frame);
-
-        // send throttling
-        const fps = Math.max(1, Math.min(120, CFG.runtime.send_fps || 30));
-        const intervalMs = 1000 / fps;
-        if (nowMs - this.lastSendMs >= intervalMs) {
-          Outputs.sendFrame(this.frame);
-          this.lastSendMs = nowMs;
-        }
-      },
-
-      computeFrame(ledWorld, nowMs){
-        const frame = new Uint8Array(480 * 3);
-        const eff = Effects.current();
-        const gamma = CFG.runtime.gamma;
-
-        for (let i=0; i<ledWorld.length; i++){
-          const led = ledWorld[i];
-
-          const a = Util.clamp01(eff.intensity(led, nowMs));
-          const rgb = eff.color(led, a);
-
-          const rr = Math.pow(rgb.r, gamma);
-          const gg = Math.pow(rgb.g, gamma);
-          const bb = Math.pow(rgb.b, gamma);
-
-          frame[i*3+0] = Math.max(0, Math.min(255, Math.round(rr * 255)));
-          frame[i*3+1] = Math.max(0, Math.min(255, Math.round(gg * 255)));
-          frame[i*3+2] = Math.max(0, Math.min(255, Math.round(bb * 255)));
-        }
-        return frame;
-      }
-    };
-
-    // ============================================================
-    // p5 entry points
-    // ============================================================
-    function setup(){ App.setup(); }
-    function draw(){ App.update(); }
-
-    function mousePressed(){ Input.mousePressed(); }
-    function mouseDragged(){ Input.mouseDragged(); }
-    function mouseReleased(){ Input.mouseReleased(); }
-    function mouseWheel(e){ return Input.mouseWheel(e); }
-    function keyPressed(){ Input.keyPressed(); }
-    function windowResized(){ resizeCanvas(window.innerWidth, window.innerHeight); }
-
-    // ページ閉じる時に切断（ベター）
+    // ページ離脱時にクローズ
     window.addEventListener("beforeunload", () => {
-      if (serialConnected) serialDisconnect();
+      // beforeunloadでawaitは効きにくいのでベストエフォート
+      if (port) { try { port.close(); } catch {} }
     });
+
+    setStatus(false);
   </script>
 </body>
 </html>
