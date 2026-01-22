@@ -1,23 +1,31 @@
-# boot.py  (Picoのルートに置く)
-import time
-from machine import Pin
+# # boot.py
+# import time
+# from machine import Pin
 
-# 1) USBが安定する猶予
-time.sleep(0.5)
+# SAFE = Pin(15, Pin.IN)  # 外付けプルアップ
 
-# 2) セーフモード（GP15をGNDで起動）
-SAFE = Pin(15, Pin.IN, Pin.PULL_UP)
+# # 本体LED
+# try:
+#     led = Pin("LED", Pin.OUT)
+# except:
+#     led = Pin(25, Pin.OUT)
 
-if not SAFE.value():
-    print("SAFE MODE: main.py will NOT start. (GP15=GND)")
-    while True:
-        time.sleep(1)
+# # USBが安定するまで待つ
+# time.sleep(0.5)
 
-# 3) 追加：起動直後2秒だけ“開発ウィンドウ”
-#    （この間にVS Codeで接続→アップロードが可能）
-print("BOOT: 2s dev window... (press Ctrl+C to stay in REPL)")
-t0 = time.ticks_ms()
-while time.ticks_diff(time.ticks_ms(), t0) < 2000:
-    time.sleep(0.05)
+# # SAFEがLOWなら救出モード（main.pyを起動しない）
+# if SAFE.value() == 0:
+#     # 速い点滅で「救出中」を示す（printなし）
+#     while True:
+#         led.toggle()
+#         time.sleep(0.1)
 
-# boot.py はここで終わり、次に main.py が実行される
+# # 通常起動の合図：2回だけ点滅
+# for _ in range(2):
+#     led.value(1)
+#     time.sleep(0.08)
+#     led.value(0)
+#     time.sleep(0.08)
+
+# # ここで終わる → main.py が起動する
+
