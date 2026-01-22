@@ -54,15 +54,19 @@
 
   <script>
     // ===== 設定 =====
-    const NUM_LEDS = 240;   // Pico側と一致させる
-    const FPS = 10;         // 送信頻度（115200なら10fps程度が安全）
+    // 片側（GP0 or GP1）あたりのLED数
+    const NUM_SIDE = 240;
+
+    // 合計（GP0 + GP1）
+    const NUM_TOTAL = NUM_SIDE * 2;      // 480
+    const FRAME_LEN = NUM_TOTAL * 3;     // 1440 bytes
+
+    const FPS = 10;                      // 送信頻度（115200なら10fps程度が安全）
 
     // 「brightness数値と“見える明るさ”を比例させる」ための補正
-    // 2.2が定番。暗部がまだ明るすぎる/変化が急なら 2.6〜2.8 に上げる。
     const GAMMA = 2.2;
 
     // 色ごとの体感差が気になる場合のゲイン（必要なら調整）
-    // まずは全部1.0で開始（現状は「brightness比例」が目的なので最小限）
     const GAIN = { r: 1.0, g: 1.0, b: 1.0 };
 
     let port = null;
@@ -127,7 +131,6 @@
     }
 
     // brightness(0..255) を「体感で比例」にするための係数(0..1)へ変換
-    // 体感 p(0..1) -> 線形光量 lin(0..1)
     function perceptualBrightnessToLinearFactor(br255){
       const p = (br255 | 0) / 255; // 0..1
       const lin = Math.pow(Math.max(0, Math.min(1, p)), GAMMA);
@@ -136,12 +139,9 @@
 
     function applyBrightnessAndGain(cr, cg, cb, br255){
       const lin = perceptualBrightnessToLinearFactor(br255);
-
-      // “brightness”を体感比例にする：linを掛ける（RGBそのものは変えない）
       const r = clamp255(cr * lin * GAIN.r);
       const g = clamp255(cg * lin * GAIN.g);
       const b = clamp255(cb * lin * GAIN.b);
-
       return { r, g, b, lin };
     }
 
@@ -161,32 +161,41 @@
       return pkt;
     }
 
-    function makeFillFrame(r,g,b){
-      const frame = new Uint8Array(NUM_LEDS * 3);
-      for (let i=0;i<NUM_LEDS;i++){
+    // ===== ここが重要：480LED（GP0+GP1）ぶんのフレームを作る =====
+    // payload layout:
+    //   [GP0: 240 LEDs RGB...] + [GP1: 240 LEDs RGB...]
+    function makeFillFrameTotal(r,g,b){
+      const frame = new Uint8Array(FRAME_LEN); // 1440
+      for (let i=0;i<NUM_TOTAL;i++){
         const j = i*3;
-        // RGB/GRBは問題ない（前のやつで合っている前提）なのでそのままRGBで送る
-        frame[j] = r;
+        frame[j]   = r;
         frame[j+1] = g;
         frame[j+2] = b;
       }
       return frame;
     }
 
-    function makeAnimFrame(){
-      // 例：点が回る
+    function makeAnimFrameTotal(){
       const br255 = Number($bright.value) | 0;
       const {r:cr, g:cg, b:cb} = hexToRgb($color.value);
-
       const { r, g, b } = applyBrightnessAndGain(cr, cg, cb, br255);
 
-      const frame = new Uint8Array(NUM_LEDS * 3);
-      const pos = t % NUM_LEDS;
+      const frame = new Uint8Array(FRAME_LEN);
 
-      const j = pos * 3;
-      frame[j] = r;
-      frame[j+1] = g;
-      frame[j+2] = b;
+      // 点が回る：GP0側とGP1側を同じ動きにする（同期確認がしやすい）
+      const pos = t % NUM_SIDE;
+
+      // GP0 の pos
+      let j0 = (pos) * 3;
+      frame[j0]   = r;
+      frame[j0+1] = g;
+      frame[j0+2] = b;
+
+      // GP1 の pos（payload後半にあるので +NUM_SIDE）
+      let j1 = (NUM_SIDE + pos) * 3;
+      frame[j1]   = r;
+      frame[j1+1] = g;
+      frame[j1+2] = b;
 
       t++;
       return frame;
@@ -194,6 +203,9 @@
 
     async function sendFrame(frameBytes){
       if (!writer) throw new Error("writer not ready");
+      if (frameBytes.length !== FRAME_LEN) {
+        throw new Error(`frame length must be ${FRAME_LEN} (got ${frameBytes.length})`);
+      }
       const pkt = buildPacketFromFrame(frameBytes);
       await writer.write(pkt);
     }
@@ -283,13 +295,13 @@
     async function sendCurrentFill(){
       const br255 = Number($bright.value) | 0;
       const {r:cr, g:cg, b:cb} = hexToRgb($color.value);
-
       const { r, g, b, lin } = applyBrightnessAndGain(cr, cg, cb, br255);
 
-      const frame = makeFillFrame(r,g,b);
+      const frame = makeFillFrameTotal(r,g,b);
       await sendFrame(frame);
 
-      logLine(`[tx] FILL rgb=(${r},${g},${b}) bright=${br255} lin=${lin.toFixed(4)} gamma=${GAMMA}`);
+      logLine(`[tx] FILL total=${NUM_TOTAL} rgb=(${r},${g},${b}) bright=${br255} lin=${lin.toFixed(4)} gamma=${GAMMA} len=${FRAME_LEN}`);
+      logLine(`[tx] layout: GP0[0..${NUM_SIDE-1}] + GP1[${NUM_SIDE}..${NUM_TOTAL-1}]`);
     }
 
     function startAnim(){
@@ -299,13 +311,14 @@
 
       animTimer = setInterval(async () => {
         try {
-          const frame = makeAnimFrame();
+          const frame = makeAnimFrameTotal();
           await sendFrame(frame);
         } catch (e) {
           logLine("[anim tx failed] " + e.message);
           stopAnim();
         }
       }, Math.round(1000 / FPS));
+
       logLine("[anim] start");
     }
 
