@@ -1,15 +1,16 @@
 import time
 from machine import Pin
 
-# ===== 起動待ち（REPL・シリアル安定化）=====
 time.sleep(2)
+boot_time = time.time()
 print("PICO BOOTED")
 
-# ===== オンボードLED =====
 led = Pin("LED", Pin.OUT)
 
-# ===== メインループ =====
 while True:
-    led.toggle()          # LED点滅
-    print("tick")         # ログ出力
-    time.sleep(1.0)       # 1秒周期
+    led.toggle()
+
+    elapsed = int(time.time() - boot_time)
+    print(f"tick : {elapsed} sec")
+
+    time.sleep(1.0)
