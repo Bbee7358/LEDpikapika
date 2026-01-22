@@ -43,7 +43,12 @@
     <button id="connect">Connect</button>
     <button id="disconnect" disabled>Disconnect</button>
 
-    <button id="toggleLed" disabled>LED Toggle</button>
+    <!-- 追加：ON/OFF ボタン -->
+    <button id="ledOn" disabled>NeoPixel ON</button>
+    <button id="ledOff" disabled>NeoPixel OFF</button>
+
+    <!-- 既存：トグル -->
+    <button id="toggleLed" disabled>NeoPixel TOGGLE</button>
 
     <span id="status">serial: OFF</span>
     <span id="ledState" class="pill">LED: ?</span>
@@ -72,6 +77,11 @@
     // UI
     const $connect = document.getElementById("connect");
     const $disconnect = document.getElementById("disconnect");
+
+    // 追加したボタン
+    const $ledOn = document.getElementById("ledOn");
+    const $ledOff = document.getElementById("ledOff");
+
     const $toggleLed = document.getElementById("toggleLed");
     const $status = document.getElementById("status");
     const $ledState = document.getElementById("ledState");
@@ -82,7 +92,12 @@
     function setStatus(on){
       $connect.disabled = on;
       $disconnect.disabled = !on;
+
+      // 接続時のみ操作可能にする
+      $ledOn.disabled = !on;
+      $ledOff.disabled = !on;
       $toggleLed.disabled = !on;
+
       $status.textContent = on ? "serial: ON" : "serial: OFF";
       if (!on) {
         $ledState.textContent = "LED: ?";
@@ -152,8 +167,7 @@
         if (!line.length) continue;
         logLine(line);
 
-        // Picoの返答を見てLED状態っぽいものを推定
-        // 例: "ACK TOGGLE -> 1" / "ACK EN 0"
+        // Picoの返答を見てLED状態を推定
         if (line.startsWith("ACK EN 1")) {
           enabledGuess = 1;
         } else if (line.startsWith("ACK EN 0")) {
@@ -163,7 +177,7 @@
           if (m) enabledGuess = Number(m[1]);
         }
 
-        if (enabledGuess === 1) $ledState.textContent = "LED: ON(auto blink)";
+        if (enabledGuess === 1) $ledState.textContent = "LED: ON";
         else if (enabledGuess === 0) $ledState.textContent = "LED: OFF";
         else $ledState.textContent = "LED: ?";
       }
@@ -216,6 +230,26 @@
 
     $disconnect.onclick = async () => { await disconnect(); };
 
+    // 追加：ON/OFF
+    $ledOn.onclick = async () => {
+      try {
+        await writeLine("EN 1");
+        logLine("[tx] EN 1");
+      } catch (e) {
+        logLine("[tx failed] " + e.message);
+      }
+    };
+
+    $ledOff.onclick = async () => {
+      try {
+        await writeLine("EN 0");
+        logLine("[tx] EN 0");
+      } catch (e) {
+        logLine("[tx failed] " + e.message);
+      }
+    };
+
+    // 既存：TOGGLE
     $toggleLed.onclick = async () => {
       try {
         await writeLine("TOGGLE");
