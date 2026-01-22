@@ -3,152 +3,158 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Pico Lチカ最小（WebSerial）</title>
-
+  <title>WebSerial Pico Test</title>
   <style>
-    body {
-      font-family: system-ui, sans-serif;
-      padding: 16px;
-    }
-    h1 {
-      margin-bottom: 12px;
-    }
-    button {
-      font-size: 16px;
-      padding: 10px 14px;
-      margin-right: 8px;
-      margin-bottom: 8px;
-    }
-    #log {
-      white-space: pre-wrap;
-      background: #f5f5f5;
-      padding: 12px;
-      border-radius: 8px;
-      margin-top: 12px;
-      height: 220px;
-      overflow-y: auto;
-      font-family: monospace;
-      font-size: 14px;
-    }
+    body{font-family:system-ui, sans-serif; padding:16px; max-width:900px; margin:0 auto;}
+    button{margin:4px 6px 4px 0; padding:10px 12px;}
+    pre{background:#111; color:#0f0; padding:12px; height:320px; overflow:auto; border-radius:8px;}
+    input{padding:10px; width:420px; max-width:100%;}
   </style>
 </head>
-
 <body>
-  <h1>Pico Lチカ最小（WebSerial）</h1>
+  <h1>WebSerial Pico Test</h1>
 
-  <button id="connect">接続</button>
-  <button id="disconnect" disabled>切断</button>
-  <br/>
-  <button id="toggle" disabled>TOGGLE</button>
-  <button id="on" disabled>ON</button>
-  <button id="off" disabled>OFF</button>
+  <div>
+    <button id="btnConnect">Connect</button>
+    <button id="btnDisconnect" disabled>Disconnect</button>
+  </div>
 
-  <div id="log"></div>
+  <div style="margin-top:10px;">
+    <button id="btnPing" disabled>PING</button>
+    <button id="btnWhite" disabled>WHITE</button>
+    <button id="btnOff" disabled>OFF</button>
+  </div>
 
-  <script>
-    let port = null;
-    let writer = null;
-    let reader = null;
+  <div style="margin-top:10px;">
+    <button id="btnSendFrame" disabled>Send FRM (test gradient)</button>
+  </div>
 
-    const logEl = document.getElementById("log");
+  <div style="margin-top:10px;">
+    <input id="txtCmd" placeholder="任意コマンド（例: hello）" />
+    <button id="btnSendLine" disabled>Send Line</button>
+  </div>
 
-    const btnConnect = document.getElementById("connect");
-    const btnDisconnect = document.getElementById("disconnect");
-    const btnToggle = document.getElementById("toggle");
-    const btnOn = document.getElementById("on");
-    const btnOff = document.getElementById("off");
+  <h2>Log</h2>
+  <pre id="log"></pre>
 
-    function log(msg) {
-      logEl.textContent += msg + "\n";
-      logEl.scrollTop = logEl.scrollHeight;
+<script>
+  let port = null;
+  let reader = null;
+  let writer = null;
+  let keepReading = false;
+
+  const logEl = document.getElementById('log');
+  const ui = {
+    connect: document.getElementById('btnConnect'),
+    disconnect: document.getElementById('btnDisconnect'),
+    ping: document.getElementById('btnPing'),
+    white: document.getElementById('btnWhite'),
+    off: document.getElementById('btnOff'),
+    sendFrame: document.getElementById('btnSendFrame'),
+    txtCmd: document.getElementById('txtCmd'),
+    sendLine: document.getElementById('btnSendLine'),
+  };
+
+  function log(s){
+    logEl.textContent += s + "\n";
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  function setConnected(on){
+    ui.disconnect.disabled = !on;
+    ui.ping.disabled = !on;
+    ui.white.disabled = !on;
+    ui.off.disabled = !on;
+    ui.sendFrame.disabled = !on;
+    ui.sendLine.disabled = !on;
+    ui.connect.disabled = on;
+  }
+
+  async function connect(){
+    if (!("serial" in navigator)) {
+      alert("WebSerial非対応のブラウザです。Chrome/Edgeで開いてください。");
+      return;
     }
+    port = await navigator.serial.requestPort();
+    // baudRateはCDCでは実質無視されることが多いが、指定は必要
+    await port.open({ baudRate: 115200 });
 
-    function setConnected(state) {
-      btnToggle.disabled = !state;
-      btnOn.disabled = !state;
-      btnOff.disabled = !state;
-      btnDisconnect.disabled = !state;
-    }
+    writer = port.writable.getWriter();
+    keepReading = true;
+    readLoop().catch(e => log("readLoop error: " + e));
 
-    async function connect() {
-      if (!("serial" in navigator)) {
-        alert("このブラウザはWebSerial非対応です。Chrome/Edgeを使ってください。");
-        return;
-      }
+    setConnected(true);
+    log("connected");
+  }
 
-      try {
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 115200 });
+  async function disconnect(){
+    keepReading = false;
+    try { if (reader) await reader.cancel(); } catch {}
+    try { if (writer) writer.releaseLock(); } catch {}
+    try { if (port) await port.close(); } catch {}
+    reader = null; writer = null; port = null;
+    setConnected(false);
+    log("disconnected");
+  }
 
-        const textEncoder = new TextEncoderStream();
-        textEncoder.readable.pipeTo(port.writable);
-        writer = textEncoder.writable.getWriter();
-
-        const textDecoder = new TextDecoderStream();
-        port.readable.pipeTo(textDecoder.writable);
-        reader = textDecoder.readable.getReader();
-
-        log("CONNECTED");
-        setConnected(true);
-
-        // Picoからのログを読む
-        (async () => {
-          try {
-            while (true) {
-              const { value, done } = await reader.read();
-              if (done) break;
-              if (value) log("PICO> " + value.trimEnd());
-            }
-          } catch (e) {
-            log("READ ERR: " + e);
-          }
-        })();
-
-      } catch (e) {
-        log("CONNECT ERR: " + e);
-        setConnected(false);
-      }
-    }
-
-    async function disconnect() {
-      try { if (reader) { await reader.cancel(); reader.releaseLock(); } } catch(e){}
-      try { if (writer) { await writer.close(); writer.releaseLock(); } } catch(e){}
-      try { if (port) { await port.close(); } } catch(e){}
-
-      reader = null;
-      writer = null;
-      port = null;
-
-      log("DISCONNECTED");
-      setConnected(false);
-    }
-
-    async function sendLine(line) {
-      if (!writer) {
-        log("NO CONNECTION");
-        return;
-      }
-      try {
-        await writer.write(line + "\n");
-        log("PC> " + line);
-      } catch (e) {
-        log("WRITE ERR: " + e);
+  async function readLoop(){
+    const textDecoder = new TextDecoder();
+    reader = port.readable.getReader();
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      if (value) {
+        // Pico側は基本テキストで返すのでこれでOK
+        log(textDecoder.decode(value).replace(/\r/g, "").trimEnd());
       }
     }
+    try { reader.releaseLock(); } catch {}
+  }
 
-    btnConnect.addEventListener("click", connect);
-    btnDisconnect.addEventListener("click", disconnect);
+  async function sendLine(line){
+    const data = new TextEncoder().encode(line + "\n");
+    await writer.write(data);
+  }
 
-    btnToggle.addEventListener("click", () => sendLine("TOGGLE"));
-    btnOn.addEventListener("click", () => sendLine("ON"));
-    btnOff.addEventListener("click", () => sendLine("OFF"));
+  async function sendFRM(numLeds){
+    // テスト用グラデ：Rが左→右で増える
+    const payload = new Uint8Array(3 * numLeds);
+    for (let i=0; i<numLeds; i++){
+      const r = Math.floor(255 * (i / Math.max(1, numLeds-1)));
+      const g = 0;
+      const b = 40;
+      payload[i*3 + 0] = r;
+      payload[i*3 + 1] = g;
+      payload[i*3 + 2] = b;
+    }
 
-    // ページ更新・終了時にクリーンに切断（ベストエフォート）
-    window.addEventListener("beforeunload", () => {
-      try { reader && reader.cancel(); } catch(e){}
-      try { writer && writer.close(); } catch(e){}
-      try { port && port.close(); } catch(e){}
-    });
-  </script>
+    // header: 'FRM' + uint16 little-endian count
+    const header = new Uint8Array(5);
+    header[0] = 'F'.charCodeAt(0);
+    header[1] = 'R'.charCodeAt(0);
+    header[2] = 'M'.charCodeAt(0);
+    header[3] = numLeds & 0xFF;
+    header[4] = (numLeds >> 8) & 0xFF;
+
+    const packet = new Uint8Array(header.length + payload.length);
+    packet.set(header, 0);
+    packet.set(payload, header.length);
+
+    await writer.write(packet);
+  }
+
+  ui.connect.onclick = connect;
+  ui.disconnect.onclick = disconnect;
+  ui.ping.onclick = () => sendLine("PING");
+  ui.white.onclick = () => sendLine("WHITE");
+  ui.off.onclick = () => sendLine("OFF");
+  ui.sendLine.onclick = () => sendLine(ui.txtCmd.value || "hello");
+
+  ui.sendFrame.onclick = () => sendFRM(240); // Pico側NUM_LEDSと合わせる
+
+  // 初期
+  setConnected(false);
+  log("open this page in Chrome/Edge, then Connect.");
+</script>
 </body>
 </html>
