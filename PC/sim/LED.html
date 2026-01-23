@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>NeoPixel Board Virtual Space (5 boards, 1m spacing)</title>
+  <title>NeoPixel Board Virtual Space (5 boards, configurable spacing)</title>
   <style>
     html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
     #ui {
@@ -12,7 +12,7 @@
       border: 1px solid rgba(255,255,255,0.10);
       border-radius: 12px;
       padding: 12px;
-      width: 520px; max-width: calc(100vw - 24px);
+      width: 560px; max-width: calc(100vw - 24px);
       box-shadow: 0 10px 30px rgba(0,0,0,0.35);
       display:flex; gap:10px; flex-wrap: wrap; align-items: center;
     }
@@ -40,6 +40,12 @@
     </div>
 
     <div class="group">
+      <span class="label">基板間隔 (mm):</span>
+      <input id="inSpacing" type="number" min="0" step="10" value="100" style="width:100px;">
+      <button id="btnApplySpacing">適用</button>
+    </div>
+
+    <div class="group">
       <span class="label">Selected board:</span>
       <span id="selLabel">none</span>
     </div>
@@ -60,41 +66,62 @@
 <script>
 (() => {
   // =============================
-  // 1) 仕様（PDFの仕様に合わせる）
+  // UI参照（最初に確保）
   // =============================
-  const BOARD_DIAM_MM = 100;      // 基板直径100mm :contentReference[oaicite:1]{index=1}
-  const LED_TOTAL = 48;           // 1基板48LED :contentReference[oaicite:2]{index=2}
+  const elSel = document.getElementById('selLabel');
+  const elStatus = document.getElementById('status');
 
-  // リング仕様 :contentReference[oaicite:3]{index=3}
+  function setStatus(s){ elStatus.textContent = s; }
+
+  // 何か例外で止まった時に画面上に出す
+  window.addEventListener('error', (e) => {
+    setStatus(`JS Error: ${e.message}`);
+  });
+
+  // =============================
+  // 1) 仕様（48LED/基板直径100mm）
+  // =============================
+  const BOARD_DIAM_MM = 100;
+  const LED_TOTAL = 48;
+
+  // リング仕様（外30/中12/内6）
   const RINGS = [
     { count: 30, diam: 92, startDeg: 0,   indexOffset: 0  },  // 0..29
     { count: 12, diam: 34, startDeg: 15,  indexOffset: 30 },  // 30..41
     { count:  6, diam: 18, startDeg: 0,   indexOffset: 42 },  // 42..47
   ];
 
-  // 5枚を1mおきに配置（mm）
+  function clamp255(n){
+    n = Number(n);
+    if (!Number.isFinite(n)) return 0;
+    return Math.max(0, Math.min(255, Math.round(n)));
+  }
+
+  // =============================
+  // 2) Boardデータ（位置は後で反映）
+  // =============================
   const boards = [];
-  const spacingMm = 1000;
-  for (let i=0;i<5;i++){
+  const BOARD_COUNT = 5;
+
+  for (let i = 0; i < BOARD_COUNT; i++) {
     boards.push({
       id: i,
-      x: i * spacingMm,
+      x: 0,
       y: 0,
       rotDeg: 0,
-      // ledColors: [ [r,g,b], ... ]（後で実機送信にそのまま使える形）
-      ledColors: Array.from({length: LED_TOTAL}, () => [0,0,0]),
+      ledColors: Array.from({ length: LED_TOTAL }, () => [0, 0, 0]),
     });
   }
 
-  // ==========================================
-  // 2) LEDローカル座標生成（基板中心が(0,0)）
-  // ==========================================
+  // =============================
+  // 3) LEDローカル座標生成（中心(0,0)）
+  // =============================
   const ledLocal = (() => {
     const arr = new Array(LED_TOTAL);
     for (const ring of RINGS) {
       const radius = ring.diam / 2;
-      for (let k=0;k<ring.count;k++){
-        const deg = ring.startDeg + (360 * k / ring.count); // 反時計回り増加 :contentReference[oaicite:4]{index=4}
+      for (let k = 0; k < ring.count; k++){
+        const deg = ring.startDeg + (360 * k / ring.count);
         const rad = deg * Math.PI / 180;
         const x = Math.cos(rad) * radius;
         const y = Math.sin(rad) * radius;
@@ -104,21 +131,26 @@
     return arr;
   })();
 
-  function rot2d(x,y,deg){
-    const a = deg * Math.PI/180;
+  function rot2d(x, y, deg){
+    const a = deg * Math.PI / 180;
     const c = Math.cos(a), s = Math.sin(a);
     return { x: x*c - y*s, y: x*s + y*c };
   }
 
-  function clamp255(n){
-    n = Number(n);
-    if (!Number.isFinite(n)) return 0;
-    return Math.max(0, Math.min(255, Math.round(n)));
+  // =============================
+  // 4) Board間隔反映
+  // =============================
+  function updateBoardPositions(spacingMm) {
+    for (let i = 0; i < boards.length; i++) {
+      boards[i].x = i * spacingMm;
+      boards[i].y = 0;
+    }
+    setStatus(`基板間隔を ${spacingMm} mm に設定`);
   }
 
-  // ==========================================
-  // 3) Canvas / Pan & Zoom / Hit test
-  // ==========================================
+  // =============================
+  // 5) Canvas / Pan & Zoom / Hit test
+  // =============================
   const canvas = document.getElementById('c');
   const ctx = canvas.getContext('2d', { alpha: false });
 
@@ -133,9 +165,8 @@
   window.addEventListener('resize', resize);
   resize();
 
-  // view transform: screen = (world * scale) + offset
   const view = {
-    scale: 0.35,        // 最初は全体見える程度
+    scale: 0.55,
     offX: window.innerWidth * 0.15,
     offY: window.innerHeight * 0.55,
   };
@@ -171,7 +202,6 @@
     const factor = Math.pow(1.0015, -e.deltaY);
     view.scale = Math.max(0.05, Math.min(3.0, view.scale * factor));
     const after = screenToWorld(mouse.x, mouse.y);
-    // ズーム中心をマウス位置に固定
     view.offX += (after.x - before.x) * view.scale;
     view.offY += (after.y - before.y) * view.scale;
   }, { passive:false });
@@ -181,7 +211,7 @@
   function hitTestBoard(screenX, screenY){
     const w = screenToWorld(screenX, screenY);
     const r = BOARD_DIAM_MM / 2;
-    // 一番近い基板中心を探し、円内ならヒット扱い
+
     let best = null;
     let bestD = Infinity;
     for (const b of boards){
@@ -202,16 +232,11 @@
     }
   });
 
-  // ==========================================
-  // 4) UI
-  // ==========================================
-  const elSel = document.getElementById('selLabel');
-  const elStatus = document.getElementById('status');
-
-  function setStatus(s){ elStatus.textContent = s; }
-
+  // =============================
+  // 6) UIイベント
+  // =============================
   document.getElementById('btnResetView').addEventListener('click', () => {
-    view.scale = 0.35;
+    view.scale = 0.55;
     view.offX = window.innerWidth * 0.15;
     view.offY = window.innerHeight * 0.55;
     setStatus('View reset');
@@ -232,9 +257,20 @@
     const r = clamp255(document.getElementById('inR').value);
     const g = clamp255(document.getElementById('inG').value);
     const b = clamp255(document.getElementById('inB').value);
+
     const board = boards.find(x => x.id === selectedBoardId);
     for (let i=0;i<LED_TOTAL;i++) board.ledColors[i] = [r,g,b];
+
     setStatus(`Filled board ${selectedBoardId} rgb=(${r},${g},${b})`);
+  });
+
+  document.getElementById('btnApplySpacing').addEventListener('click', () => {
+    const v = Number(document.getElementById('inSpacing').value);
+    if (!Number.isFinite(v) || v < 0) {
+      setStatus('無効な間隔です');
+      return;
+    }
+    updateBoardPositions(v);
   });
 
   let waveMode = false;
@@ -243,11 +279,10 @@
     setStatus(waveMode ? 'TEST WAVE: ON' : 'TEST WAVE: OFF');
   });
 
-  // ==========================================
-  // 5) 描画
-  // ==========================================
+  // =============================
+  // 7) 描画
+  // =============================
   function drawGrid(){
-    // 1000mmグリッド（=1m）を薄く表示
     const step = 1000;
     const w0 = screenToWorld(0,0);
     const w1 = screenToWorld(window.innerWidth, window.innerHeight);
@@ -274,7 +309,6 @@
     }
     ctx.stroke();
 
-    // 軸
     ctx.strokeStyle = 'rgba(255,255,255,0.10)';
     ctx.beginPath();
     {
@@ -294,13 +328,11 @@
     const c = worldToScreen(board.x, board.y);
     const r = (BOARD_DIAM_MM/2) * view.scale;
 
-    // 基板円
     ctx.fillStyle = 'rgba(255,255,255,0.03)';
     ctx.beginPath();
     ctx.arc(c.x, c.y, r, 0, Math.PI*2);
     ctx.fill();
 
-    // 選択枠
     if (board.id === selectedBoardId){
       ctx.lineWidth = 2;
       ctx.strokeStyle = 'rgba(180,220,255,0.70)';
@@ -315,7 +347,6 @@
       ctx.stroke();
     }
 
-    // LED点
     const ledRadiusPx = Math.max(1.6, 3.0 * view.scale);
     for (let i=0;i<LED_TOTAL;i++){
       const loc = ledLocal[i];
@@ -326,60 +357,58 @@
       const [R,G,B] = board.ledColors[i];
       const on = (R|G|B) !== 0;
 
-      // 外枠
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
       ctx.beginPath();
       ctx.arc(s.x, s.y, ledRadiusPx+1.2, 0, Math.PI*2);
       ctx.fill();
 
-      // 発光
-      if (on){
-        ctx.fillStyle = `rgb(${R},${G},${B})`;
-      } else {
-        ctx.fillStyle = 'rgba(0,0,0,0.65)';
-      }
+      ctx.fillStyle = on ? `rgb(${R},${G},${B})` : 'rgba(0,0,0,0.65)';
       ctx.beginPath();
       ctx.arc(s.x, s.y, ledRadiusPx, 0, Math.PI*2);
       ctx.fill();
     }
 
-    // ラベル
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
     ctx.font = '12px system-ui';
     ctx.fillText(`board${board.id}  x=${board.x}mm`, c.x - r, c.y + r + 16);
   }
 
-  // ==========================================
-  // 6) “あとから光らせる”ための雛形（Effect）
-  // ==========================================
+  // =============================
+  // 8) Effect雛形
+  // =============================
   function applyTestWave(t){
-    // boardごとに位相をずらして、LED番号で色相が変わるだけの簡易
-    for (const b of boards){
+    for (const bd of boards){
       for (let i=0;i<LED_TOTAL;i++){
-        const p = (t*0.001 + b.id*0.25 + i/LED_TOTAL);
+        const p = (t*0.001 + bd.id*0.25 + i/LED_TOTAL);
         const r = Math.floor(40 + 40*Math.sin(p*2*Math.PI));
         const g = Math.floor(40 + 40*Math.sin((p+0.33)*2*Math.PI));
-        const bb = Math.floor(40 + 40*Math.sin((p+0.66)*2*Math.PI));
-        b.ledColors[i] = [r,g,bb];
+        const b = Math.floor(40 + 40*Math.sin((p+0.66)*2*Math.PI));
+        bd.ledColors[i] = [r,g,b];
       }
     }
   }
 
-  // ==========================================
-  // 7) ループ
-  // ==========================================
+  // =============================
+  // 9) 初期配置（ここで呼ぶ！）
+  // =============================
+  const DEFAULT_SPACING = 100;
+  document.getElementById('inSpacing').value = String(DEFAULT_SPACING);
+  updateBoardPositions(DEFAULT_SPACING);
+
+  // =============================
+  // 10) ループ
+  // =============================
   let t0 = performance.now();
   function loop(now){
     const t = now - t0;
 
     if (waveMode) applyTestWave(t);
 
-    // 背景
     ctx.fillStyle = '#0b0f14';
     ctx.fillRect(0,0,window.innerWidth, window.innerHeight);
 
     drawGrid();
-    for (const b of boards) drawBoard(b);
+    for (const bd of boards) drawBoard(bd);
 
     elSel.textContent = (selectedBoardId === null) ? 'none' : String(selectedBoardId);
 
