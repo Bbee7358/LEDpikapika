@@ -183,5 +183,3 @@ while True:
         last_blink = now
         onboard_state ^= 1
         onboard.value(onboard_state)
-
-    time.sleep(0.001)
