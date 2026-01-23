@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>NeoPixel Board Virtual Space (5 boards, configurable spacing)</title>
+  <title>NeoPixel Board Virtual Space (5 boards, configurable spacing + Board Flow)</title>
   <style>
     html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
     #ui {
@@ -12,7 +12,7 @@
       border: 1px solid rgba(255,255,255,0.10);
       border-radius: 12px;
       padding: 12px;
-      width: 560px; max-width: calc(100vw - 24px);
+      width: 640px; max-width: calc(100vw - 24px);
       box-shadow: 0 10px 30px rgba(0,0,0,0.35);
       display:flex; gap:10px; flex-wrap: wrap; align-items: center;
     }
@@ -37,6 +37,7 @@
       <button id="btnResetView">RESET VIEW</button>
       <button id="btnClear">CLEAR ALL</button>
       <button id="btnWave">TEST WAVE</button>
+      <button id="btnFlow">BOARD FLOW</button>
     </div>
 
     <div class="group">
@@ -73,7 +74,6 @@
 
   function setStatus(s){ elStatus.textContent = s; }
 
-  // 何か例外で止まった時に画面上に出す
   window.addEventListener('error', (e) => {
     setStatus(`JS Error: ${e.message}`);
   });
@@ -84,11 +84,10 @@
   const BOARD_DIAM_MM = 100;
   const LED_TOTAL = 48;
 
-  // リング仕様（外30/中12/内6）
   const RINGS = [
-    { count: 30, diam: 92, startDeg: 0,   indexOffset: 0  },  // 0..29
-    { count: 12, diam: 34, startDeg: 15,  indexOffset: 30 },  // 30..41
-    { count:  6, diam: 18, startDeg: 0,   indexOffset: 42 },  // 42..47
+    { count: 30, diam: 92, startDeg: 0,   indexOffset: 0  },  // 外周
+    { count: 12, diam: 34, startDeg: 15,  indexOffset: 30 },  // 中
+    { count:  6, diam: 18, startDeg: 0,   indexOffset: 42 },  // 内
   ];
 
   function clamp255(n){
@@ -97,8 +96,27 @@
     return Math.max(0, Math.min(255, Math.round(n)));
   }
 
+  function lerp(a,b,t){ return a + (b-a)*t; }
+  function smoothstep(t){
+    t = Math.max(0, Math.min(1, t));
+    return t*t*(3 - 2*t);
+  }
+
   // =============================
-  // 2) Boardデータ（位置は後で反映）
+  // 1.5) 乱数（安定スパーク用）
+  // =============================
+  function hash11(n){
+    // 0..1
+    const x = Math.sin(n * 127.1) * 43758.5453123;
+    return x - Math.floor(x);
+  }
+  function hash21(x,y){
+    const n = x*127.1 + y*311.7;
+    return hash11(n);
+  }
+
+  // =============================
+  // 2) Boardデータ
   // =============================
   const boards = [];
   const BOARD_COUNT = 5;
@@ -114,7 +132,7 @@
   }
 
   // =============================
-  // 3) LEDローカル座標生成（中心(0,0)）
+  // 3) LEDローカル座標（中心(0,0)）
   // =============================
   const ledLocal = (() => {
     const arr = new Array(LED_TOTAL);
@@ -138,13 +156,56 @@
   }
 
   // =============================
-  // 4) Board間隔反映
+  // 3.5) 外周インデックス（回り込み演出用）
   // =============================
+  const OUTER_START = RINGS[0].indexOffset;
+  const OUTER_COUNT = RINGS[0].count;
+
+  function outerIndexToLed(i){
+    // 0..OUTER_COUNT-1 -> ledIndex
+    return OUTER_START + ((i % OUTER_COUNT) + OUTER_COUNT) % OUTER_COUNT;
+  }
+
+  // =============================
+  // 4) Board間隔反映 + ワールドLEDキャッシュ
+  // =============================
+  let ledWorldCache = []; // [{boardId, ledIndex, x, y}]
+  let flowPathMinX = 0;
+  let flowPathMaxX = 0;
+  let flowPathLen = 1;
+
+  function rebuildLedWorldCache(){
+    ledWorldCache = [];
+    for (const bd of boards){
+      for (let i=0;i<LED_TOTAL;i++){
+        const loc = ledLocal[i];
+        const rr = rot2d(loc.x, loc.y, bd.rotDeg);
+        ledWorldCache.push({
+          boardId: bd.id,
+          ledIndex: i,
+          x: bd.x + rr.x,
+          y: bd.y + rr.y
+        });
+      }
+    }
+    // ルート長（最左～最右 + 余白）
+    const pad = BOARD_DIAM_MM * 0.75;
+    let minX = Infinity, maxX = -Infinity;
+    for (const p of ledWorldCache){
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+    }
+    flowPathMinX = minX - pad;
+    flowPathMaxX = maxX + pad;
+    flowPathLen = Math.max(1, flowPathMaxX - flowPathMinX);
+  }
+
   function updateBoardPositions(spacingMm) {
     for (let i = 0; i < boards.length; i++) {
       boards[i].x = i * spacingMm;
       boards[i].y = 0;
     }
+    rebuildLedWorldCache();
     setStatus(`基板間隔を ${spacingMm} mm に設定`);
   }
 
@@ -214,11 +275,11 @@
 
     let best = null;
     let bestD = Infinity;
-    for (const b of boards){
-      const dx = w.x - b.x;
-      const dy = w.y - b.y;
+    for (const bd of boards){
+      const dx = w.x - bd.x;
+      const dy = w.y - bd.y;
       const d2 = dx*dx + dy*dy;
-      if (d2 < bestD) { bestD = d2; best = b; }
+      if (d2 < bestD) { bestD = d2; best = bd; }
     }
     if (!best) return null;
     return (bestD <= r*r) ? best.id : null;
@@ -243,8 +304,8 @@
   });
 
   document.getElementById('btnClear').addEventListener('click', () => {
-    for (const b of boards){
-      for (let i=0;i<LED_TOTAL;i++) b.ledColors[i] = [0,0,0];
+    for (const bd of boards){
+      for (let i=0;i<LED_TOTAL;i++) bd.ledColors[i] = [0,0,0];
     }
     setStatus('Cleared all LEDs');
   });
@@ -258,8 +319,8 @@
     const g = clamp255(document.getElementById('inG').value);
     const b = clamp255(document.getElementById('inB').value);
 
-    const board = boards.find(x => x.id === selectedBoardId);
-    for (let i=0;i<LED_TOTAL;i++) board.ledColors[i] = [r,g,b];
+    const bd = boards.find(x => x.id === selectedBoardId);
+    for (let i=0;i<LED_TOTAL;i++) bd.ledColors[i] = [r,g,b];
 
     setStatus(`Filled board ${selectedBoardId} rgb=(${r},${g},${b})`);
   });
@@ -274,9 +335,18 @@
   });
 
   let waveMode = false;
+  let flowMode = false;
+
   document.getElementById('btnWave').addEventListener('click', () => {
     waveMode = !waveMode;
+    if (waveMode) flowMode = false;
     setStatus(waveMode ? 'TEST WAVE: ON' : 'TEST WAVE: OFF');
+  });
+
+  document.getElementById('btnFlow').addEventListener('click', () => {
+    flowMode = !flowMode;
+    if (flowMode) waveMode = false;
+    setStatus(flowMode ? 'BOARD FLOW: ON' : 'BOARD FLOW: OFF');
   });
 
   // =============================
@@ -324,8 +394,8 @@
     ctx.stroke();
   }
 
-  function drawBoard(board){
-    const c = worldToScreen(board.x, board.y);
+  function drawBoard(bd){
+    const c = worldToScreen(bd.x, bd.y);
     const r = (BOARD_DIAM_MM/2) * view.scale;
 
     ctx.fillStyle = 'rgba(255,255,255,0.03)';
@@ -333,7 +403,7 @@
     ctx.arc(c.x, c.y, r, 0, Math.PI*2);
     ctx.fill();
 
-    if (board.id === selectedBoardId){
+    if (bd.id === selectedBoardId){
       ctx.lineWidth = 2;
       ctx.strokeStyle = 'rgba(180,220,255,0.70)';
       ctx.beginPath();
@@ -350,11 +420,11 @@
     const ledRadiusPx = Math.max(1.6, 3.0 * view.scale);
     for (let i=0;i<LED_TOTAL;i++){
       const loc = ledLocal[i];
-      const rr = rot2d(loc.x, loc.y, board.rotDeg);
-      const w = { x: board.x + rr.x, y: board.y + rr.y };
+      const rr = rot2d(loc.x, loc.y, bd.rotDeg);
+      const w = { x: bd.x + rr.x, y: bd.y + rr.y };
       const s = worldToScreen(w.x, w.y);
 
-      const [R,G,B] = board.ledColors[i];
+      const [R,G,B] = bd.ledColors[i];
       const on = (R|G|B) !== 0;
 
       ctx.fillStyle = 'rgba(255,255,255,0.10)';
@@ -370,11 +440,11 @@
 
     ctx.fillStyle = 'rgba(255,255,255,0.75)';
     ctx.font = '12px system-ui';
-    ctx.fillText(`board${board.id}  x=${board.x}mm`, c.x - r, c.y + r + 16);
+    ctx.fillText(`board${bd.id}  x=${bd.x}mm`, c.x - r, c.y + r + 16);
   }
 
   // =============================
-  // 8) Effect雛形
+  // 8) Effects
   // =============================
   function applyTestWave(t){
     for (const bd of boards){
@@ -388,8 +458,229 @@
     }
   }
 
+  // ===== 追加：境界フラッシュ用の状態 =====
+  let lastPos = 0;
+  let lastBoardIdx = 0;
+  let flashEnergy = Array.from({length: BOARD_COUNT}, () => 0); // boardごとのフラッシュ蓄積(0..1)
+
+  // ===== 追加：スパーク用（LEDごとに減衰するエネルギー）=====
+  // sparkE[boardId][ledIndex] = 0..1
+  let sparkE = Array.from({length: BOARD_COUNT}, () => new Float32Array(LED_TOTAL));
+
+  function decaySpark(dtSec){
+    // 指数減衰
+    const k = 7.5; // 大きいほど早く消える
+    const a = Math.exp(-k * dtSec);
+    for (let b=0;b<BOARD_COUNT;b++){
+      const arr = sparkE[b];
+      for (let i=0;i<LED_TOTAL;i++){
+        arr[i] *= a;
+        if (arr[i] < 0.0008) arr[i] = 0;
+      }
+    }
+  }
+
+  function applyBoardFlow(nowMs){
+    const t = nowMs; // ms
+    const dtSec = Math.max(0.001, (t - (applyBoardFlow._prevT ?? t)) * 0.001);
+    applyBoardFlow._prevT = t;
+
+    // ===== 調整パラメータ（近未来っぽさ）=====
+    const speedMmPerSec = 650;      // 移動速度
+    const coreWidthMm   = 55;       // コアの太さ（小さいほど鋭い）
+    const trailLenMm    = 240;      // 残光の長さ
+    const maxVal        = 230;      // 明るさ上限
+
+    // ===== 追加：スパーク/フラッシュ/回り込み調整 =====
+    const sparkSpawnRate = 0.75;    // スパークの出やすさ（大きいほど頻発）
+    const sparkNearCore  = 0.55;    // コア近辺判定しきい値（0..1）
+    const sparkMax       = 0.85;    // スパーク最大エネルギー
+    const flashBoost     = 1.2;     // 境界フラッシュの強さ
+    const flashDecayK    = 5.5;     // フラッシュ減衰速度
+
+    const orbitLenMm     = 220;     // 外周回り込みの「到達距離」（大きいほど広がる）
+    const orbitSpeed     = 2.8;     // 外周走査の速度（周/秒相当）
+    const orbitGain      = 0.9;     // 外周演出の強さ
+
+    // ルート上の現在位置（xだけで動かす）
+    const pos = flowPathMinX + ((t * 0.001 * speedMmPerSec) % flowPathLen);
+
+    // ===== 境界判定（board indexが変わった瞬間にフラッシュ注入）=====
+    // boardの中心Xを使って「今どの基板区間か」をざっくり判定
+    // spacingは boards[i].x の差で推定（0間隔でも破綻しないようガード）
+    const spacing = Math.max(1, (boards[1]?.x ?? 100) - (boards[0]?.x ?? 0));
+    const approxIdx = Math.max(0, Math.min(BOARD_COUNT-1, Math.floor((pos - boards[0].x + spacing*0.5) / spacing)));
+
+    if (approxIdx !== lastBoardIdx){
+      // 跨いだ先の基板にフラッシュを入れる（未来感：到達した瞬間の閃光）
+      flashEnergy[approxIdx] = Math.min(1, flashEnergy[approxIdx] + 0.85);
+      // 直前基板にも少し残す（橋渡し）
+      flashEnergy[lastBoardIdx] = Math.min(1, flashEnergy[lastBoardIdx] + 0.35);
+      lastBoardIdx = approxIdx;
+    }
+
+    // フラッシュ減衰
+    {
+      const a = Math.exp(-flashDecayK * dtSec);
+      for (let i=0;i<BOARD_COUNT;i++){
+        flashEnergy[i] *= a;
+        if (flashEnergy[i] < 0.001) flashEnergy[i] = 0;
+      }
+    }
+
+    // ===== 色：シアン↔マゼンタを時間で変調 =====
+    const hue = (Math.sin(t * 0.0012) + 1) * 0.5; // 0..1
+    const baseA = { r: 0,   g: 210, b: 255 }; // cyan
+    const baseB = { r: 255, g: 0,   b: 200 }; // magenta
+    const base = {
+      r: lerp(baseA.r, baseB.r, hue),
+      g: lerp(baseA.g, baseB.g, hue),
+      b: lerp(baseA.b, baseB.b, hue),
+    };
+
+    // まず消灯
+    for (const bd of boards){
+      for (let i=0;i<LED_TOTAL;i++) bd.ledColors[i] = [0,0,0];
+    }
+
+    // スパーク減衰を先に
+    decaySpark(dtSec);
+
+    // ===== 追加：外周だけ回り込み（board単位演出）=====
+    // 「進行方向に合わせて」= 左→右へ流れてるので、到達した基板ほど外周が走査する
+    // 到達感は pos と board中心x の距離で決める（近いほど強い）
+    for (const bd of boards){
+      const dxToCenter = (bd.x - pos); // 0付近で到達
+      const near = Math.exp(-(dxToCenter*dxToCenter) / (2 * (120*120))); // 0..1
+      if (near < 0.02 && flashEnergy[bd.id] < 0.02) continue;
+
+      // 走査位相（時間で回す + boardIdで少しずらす）
+      const phase = (t*0.001*orbitSpeed + bd.id*0.17) % 1; // 0..1
+      const head = Math.floor(phase * OUTER_COUNT);        // 先頭LED
+
+      // headから後ろに残光（距離=ステップ数で減衰）
+      for (let s=0; s<OUTER_COUNT; s++){
+        const idx = outerIndexToLed(head - s);
+        // sを距離として 0..1 に
+        const dd = s / Math.max(1, Math.floor((orbitLenMm/ (Math.PI*RINGS[0].diam)) * OUTER_COUNT));
+        if (dd > 1) break;
+
+        // 強度：近いほど強い。flashがあるときも強く
+        const a = smoothstep(1 - dd) * (0.35 + 0.65*near) * orbitGain + flashEnergy[bd.id]*0.35;
+        if (a < 0.01) continue;
+
+        // 先頭は白寄り
+        const whiteMix = Math.min(1, (1-dd)*1.2);
+        const rr = lerp(base.r, 255, whiteMix);
+        const gg = lerp(base.g, 255, whiteMix);
+        const bb = lerp(base.b, 255, whiteMix);
+
+        const R = clamp255(rr * a * (maxVal/255));
+        const G = clamp255(gg * a * (maxVal/255));
+        const B = clamp255(bb * a * (maxVal/255));
+
+        // 既存値と加算合成（強い方を残す）
+        const cur = boards[bd.id].ledColors[idx];
+        boards[bd.id].ledColors[idx] = [
+          Math.max(cur[0], R),
+          Math.max(cur[1], G),
+          Math.max(cur[2], B),
+        ];
+      }
+    }
+
+    // ===== メイン：基板→基板の直線フロー（あなたの式 + 強化）=====
+    for (const p of ledWorldCache){
+      let dx = p.x - pos;
+
+      // ループ境界近くでの「途切れ」防止（最短距離を取る）
+      if (dx >  flowPathLen/2) dx -= flowPathLen;
+      if (dx < -flowPathLen/2) dx += flowPathLen;
+
+      // コア：鋭い山
+      const core = Math.exp(-(dx*dx) / (2 * coreWidthMm * coreWidthMm));
+
+      // トレイル：後方だけに長く残す
+      let trail = 0;
+      if (dx < 0) {
+        const td = Math.min(trailLenMm, -dx);
+        trail = 1.0 - (td / trailLenMm);
+        trail = smoothstep(trail) * 0.65;
+      }
+
+      // y方向の減衰（線状に見せる）
+      const yFall = Math.exp(-(p.y*p.y) / (2 * 35 * 35));
+
+      // 合成強度（ここに境界フラッシュを少し足す）
+      const flash = flashEnergy[p.boardId] * flashBoost;
+      const a0 = (core * 1.0 + trail) * yFall;
+      const a = Math.min(1.0, a0 + flash * yFall * 0.55);
+
+      if (a <= 0.003) continue;
+
+      // 近未来感：コアほど白寄り
+      const whiteMix = Math.min(1, core * 1.4 + flash*0.4);
+      const rr = lerp(base.r, 255, whiteMix);
+      const gg = lerp(base.g, 255, whiteMix);
+      const bb = lerp(base.b, 255, whiteMix);
+
+      const R = clamp255(rr * a * (maxVal/255));
+      const G = clamp255(gg * a * (maxVal/255));
+      const B = clamp255(bb * a * (maxVal/255));
+
+      const cur = boards[p.boardId].ledColors[p.ledIndex];
+      boards[p.boardId].ledColors[p.ledIndex] = [
+        Math.max(cur[0], R),
+        Math.max(cur[1], G),
+        Math.max(cur[2], B),
+      ];
+
+      // ===== 追加：スパーク（コア周りに点滅ノイズ散布）=====
+      // コア付近で、確率的にエネルギーを注入 → 後で白っぽく点滅
+      // 乱数は「LEDごとに安定 + 時間で更新」させる
+      if (core > sparkNearCore){
+        const timeBin = Math.floor(t / 55); // 55msごとに更新
+        const r01 = hash21(p.boardId*1000 + p.ledIndex, timeBin);
+        // coreが強いほど出やすい
+        const prob = sparkSpawnRate * (core - sparkNearCore) * 1.8;
+        if (r01 < prob){
+          const e = (0.25 + 0.75*hash11(r01*999.9)) * sparkMax;
+          sparkE[p.boardId][p.ledIndex] = Math.max(sparkE[p.boardId][p.ledIndex], e);
+        }
+      }
+    }
+
+    // ===== スパークを色に反映（白〜薄シアン寄り）=====
+    for (let b=0;b<BOARD_COUNT;b++){
+      const eArr = sparkE[b];
+      for (let i=0;i<LED_TOTAL;i++){
+        const e = eArr[i];
+        if (e <= 0) continue;
+
+        // 少しだけ色味（未来感）を残しつつほぼ白
+        const sR = lerp(base.r, 255, 0.85);
+        const sG = lerp(base.g, 255, 0.85);
+        const sB = lerp(base.b, 255, 0.85);
+
+        const addA = 0.20 + 0.80*e; // スパーク強度
+        const R = clamp255(sR * addA * (maxVal/255));
+        const G = clamp255(sG * addA * (maxVal/255));
+        const B = clamp255(sB * addA * (maxVal/255));
+
+        const cur = boards[b].ledColors[i];
+        boards[b].ledColors[i] = [
+          Math.max(cur[0], R),
+          Math.max(cur[1], G),
+          Math.max(cur[2], B),
+        ];
+      }
+    }
+
+    lastPos = pos;
+  }
+
   // =============================
-  // 9) 初期配置（ここで呼ぶ！）
+  // 9) 初期配置
   // =============================
   const DEFAULT_SPACING = 100;
   document.getElementById('inSpacing').value = String(DEFAULT_SPACING);
@@ -403,6 +694,7 @@
     const t = now - t0;
 
     if (waveMode) applyTestWave(t);
+    if (flowMode) applyBoardFlow(t0 + t); // 実時間っぽく渡す
 
     ctx.fillStyle = '#0b0f14';
     ctx.fillRect(0,0,window.innerWidth, window.innerHeight);

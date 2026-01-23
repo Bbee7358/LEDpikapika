@@ -1,0 +1,369 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>WebSerial NeoPixel Frame Sender</title>
+  <style>
+    html, body { margin:0; height:100%; background:#0b0f14; color:#e8eef7; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+    #ui { padding: 14px; display:flex; gap:10px; align-items:center; flex-wrap: wrap; }
+    button, input {
+      padding: 10px 14px; border-radius: 10px;
+      border: 1px solid rgba(255,255,255,0.16);
+      background: rgba(255,255,255,0.06); color:#e8eef7; cursor:pointer;
+    }
+    button:disabled, input:disabled { opacity:.45; cursor:not-allowed; }
+    #status { opacity:.9; font-size: 13px; }
+    #log {
+      width: calc(100% - 28px);
+      height: calc(100% - 110px);
+      margin: 0 14px 14px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      background: rgba(0,0,0,0.25);
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.4;
+      overflow: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    label { display:flex; gap:8px; align-items:center; font-size: 12px; opacity:.95; }
+    .pill { padding: 6px 10px; border: 1px solid rgba(255,255,255,0.14); border-radius: 999px; font-size: 12px; opacity: .9; }
+    input[type="color"]{ padding: 3px 6px; height: 38px; }
+    input[type="range"]{ width: 180px; }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <button id="connect">Connect</button>
+    <button id="disconnect" disabled>Disconnect</button>
+
+    <label>Color <input id="color" type="color" value="#ff0000" disabled></label>
+    <label>Brightness <input id="bright" type="range" min="0" max="255" value="20" disabled> <span id="brightVal" class="pill">20</span></label>
+
+    <button id="send" disabled>Send Frame</button>
+
+    <button id="anim" disabled>Start Anim</button>
+
+    <span id="status">serial: OFF</span>
+  </div>
+
+  <div id="log"></div>
+
+  <script>
+    // ===== 設定 =====
+    // 片側（GP0 or GP1）あたりのLED数
+    const NUM_SIDE = 240;
+
+    // 合計（GP0 + GP1）
+    const NUM_TOTAL = NUM_SIDE * 2;      // 480
+    const FRAME_LEN = NUM_TOTAL * 3;     // 1440 bytes
+
+    const FPS = 10;                      // 送信頻度（115200なら10fps程度が安全）
+
+    // 「brightness数値と“見える明るさ”を比例させる」ための補正
+    const GAMMA = 2.2;
+
+    // 色ごとの体感差が気になる場合のゲイン（必要なら調整）
+    const GAIN = { r: 1.0, g: 1.0, b: 1.0 };
+
+    let port = null;
+
+    // read
+    let reader = null;
+    let textDecoder = null;
+    let rxBuf = "";
+
+    // write (binary)
+    let writer = null;
+
+    // --- pipeTo lifecycle (read only) ---
+    let readableClosed = null;
+    let readAbort = null;
+
+    // UI
+    const $connect = document.getElementById("connect");
+    const $disconnect = document.getElementById("disconnect");
+    const $status = document.getElementById("status");
+    const $log = document.getElementById("log");
+
+    const $color = document.getElementById("color");
+    const $bright = document.getElementById("bright");
+    const $brightVal = document.getElementById("brightVal");
+    const $send = document.getElementById("send");
+    const $anim = document.getElementById("anim");
+
+    let animTimer = null;
+    let t = 0;
+
+    function setStatus(on){
+      $connect.disabled = on;
+      $disconnect.disabled = !on;
+
+      $color.disabled = !on;
+      $bright.disabled = !on;
+      $send.disabled = !on;
+      $anim.disabled = !on;
+
+      $status.textContent = on ? "serial: ON" : "serial: OFF";
+    }
+
+    function logLine(s){
+      $log.textContent += s + "\n";
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    function hexToRgb(hex){
+      const h = hex.replace("#","").trim();
+      const r = parseInt(h.slice(0,2),16);
+      const g = parseInt(h.slice(2,4),16);
+      const b = parseInt(h.slice(4,6),16);
+      return {r,g,b};
+    }
+
+    function clamp255(v){
+      v = Math.round(v);
+      if (v < 0) return 0;
+      if (v > 255) return 255;
+      return v;
+    }
+
+    // brightness(0..255) を「体感で比例」にするための係数(0..1)へ変換
+    function perceptualBrightnessToLinearFactor(br255){
+      const p = (br255 | 0) / 255; // 0..1
+      const lin = Math.pow(Math.max(0, Math.min(1, p)), GAMMA);
+      return lin;
+    }
+
+    function applyBrightnessAndGain(cr, cg, cb, br255){
+      const lin = perceptualBrightnessToLinearFactor(br255);
+      const r = clamp255(cr * lin * GAIN.r);
+      const g = clamp255(cg * lin * GAIN.g);
+      const b = clamp255(cb * lin * GAIN.b);
+      return { r, g, b, lin };
+    }
+
+    function buildPacketFromFrame(frameBytes){
+      // packet: 'N''P' + u16len + payload + xor
+      let x = 0;
+      for (let i=0;i<frameBytes.length;i++) x ^= frameBytes[i];
+
+      const len = frameBytes.length;
+      const pkt = new Uint8Array(2 + 2 + len + 1);
+      pkt[0] = "N".charCodeAt(0);
+      pkt[1] = "P".charCodeAt(0);
+      pkt[2] = len & 0xFF;
+      pkt[3] = (len >> 8) & 0xFF;
+      pkt.set(frameBytes, 4);
+      pkt[pkt.length - 1] = x & 0xFF;
+      return pkt;
+    }
+
+    // ===== ここが重要：480LED（GP0+GP1）ぶんのフレームを作る =====
+    // payload layout:
+    //   [GP0: 240 LEDs RGB...] + [GP1: 240 LEDs RGB...]
+    function makeFillFrameTotal(r,g,b){
+      const frame = new Uint8Array(FRAME_LEN); // 1440
+      for (let i=0;i<NUM_TOTAL;i++){
+        const j = i*3;
+        frame[j]   = r;
+        frame[j+1] = g;
+        frame[j+2] = b;
+      }
+      return frame;
+    }
+
+    function makeAnimFrameTotal(){
+      const br255 = Number($bright.value) | 0;
+      const {r:cr, g:cg, b:cb} = hexToRgb($color.value);
+      const { r, g, b } = applyBrightnessAndGain(cr, cg, cb, br255);
+
+      const frame = new Uint8Array(FRAME_LEN);
+
+      // 点が回る：GP0側とGP1側を同じ動きにする（同期確認がしやすい）
+      const pos = t % NUM_SIDE;
+
+      // GP0 の pos
+      let j0 = (pos) * 3;
+      frame[j0]   = r;
+      frame[j0+1] = g;
+      frame[j0+2] = b;
+
+      // GP1 の pos（payload後半にあるので +NUM_SIDE）
+      let j1 = (NUM_SIDE + pos) * 3;
+      frame[j1]   = r;
+      frame[j1+1] = g;
+      frame[j1+2] = b;
+
+      t++;
+      return frame;
+    }
+
+    async function sendFrame(frameBytes){
+      if (!writer) throw new Error("writer not ready");
+      if (frameBytes.length !== FRAME_LEN) {
+        throw new Error(`frame length must be ${FRAME_LEN} (got ${frameBytes.length})`);
+      }
+      const pkt = buildPacketFromFrame(frameBytes);
+      await writer.write(pkt);
+    }
+
+    async function connect(){
+      if (!("serial" in navigator)) {
+        alert("WebSerial非対応です。Chromeで開いてください。");
+        return;
+      }
+      if (port) return;
+
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+
+      setStatus(true);
+      logLine("[connected]");
+
+      // ---- write setup (binary) ----
+      writer = port.writable.getWriter();
+
+      // ---- read setup ----
+      textDecoder = new TextDecoderStream();
+      readAbort = new AbortController();
+      readableClosed = port.readable.pipeTo(textDecoder.writable, { signal: readAbort.signal });
+      reader = textDecoder.readable.getReader();
+      readableClosed.catch(() => {});
+
+      (async () => {
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            if (value) onText(value);
+          }
+        } catch (e) {
+          logLine("[read error] " + e.message);
+        } finally {
+          try { reader?.releaseLock(); } catch {}
+          reader = null;
+        }
+      })();
+
+      // 接続直後に一回送る（同期用）
+      await sendCurrentFill();
+    }
+
+    function onText(txt){
+      rxBuf += txt;
+      const lines = rxBuf.split(/\r?\n/);
+      rxBuf = lines.pop();
+      for (const line of lines) {
+        if (!line.length) continue;
+        logLine(line);
+      }
+    }
+
+    async function disconnect(){
+      if (!port) return;
+
+      logLine("[disconnecting]");
+
+      // anim stop
+      stopAnim();
+
+      // stop read loop
+      try { await reader?.cancel(); } catch {}
+      try { reader?.releaseLock(); } catch {}
+      reader = null;
+
+      // stop pipe
+      try { readAbort?.abort(); } catch {}
+      readAbort = null;
+      try { await readableClosed; } catch {}
+      readableClosed = null;
+
+      // release writer
+      try { writer?.releaseLock(); } catch {}
+      writer = null;
+
+      try { await port.close(); } catch (e) { logLine("[close error] " + e.message); }
+      port = null;
+
+      setStatus(false);
+      logLine("[disconnected]");
+    }
+
+    async function sendCurrentFill(){
+      const br255 = Number($bright.value) | 0;
+      const {r:cr, g:cg, b:cb} = hexToRgb($color.value);
+      const { r, g, b, lin } = applyBrightnessAndGain(cr, cg, cb, br255);
+
+      const frame = makeFillFrameTotal(r,g,b);
+      await sendFrame(frame);
+
+      logLine(`[tx] FILL total=${NUM_TOTAL} rgb=(${r},${g},${b}) bright=${br255} lin=${lin.toFixed(4)} gamma=${GAMMA} len=${FRAME_LEN}`);
+      logLine(`[tx] layout: GP0[0..${NUM_SIDE-1}] + GP1[${NUM_SIDE}..${NUM_TOTAL-1}]`);
+    }
+
+    function startAnim(){
+      if (animTimer) return;
+      $anim.textContent = "Stop Anim";
+      t = 0;
+
+      animTimer = setInterval(async () => {
+        try {
+          const frame = makeAnimFrameTotal();
+          await sendFrame(frame);
+        } catch (e) {
+          logLine("[anim tx failed] " + e.message);
+          stopAnim();
+        }
+      }, Math.round(1000 / FPS));
+
+      logLine("[anim] start");
+    }
+
+    function stopAnim(){
+      if (!animTimer) return;
+      clearInterval(animTimer);
+      animTimer = null;
+      $anim.textContent = "Start Anim";
+      logLine("[anim] stop");
+    }
+
+    // UI
+    $connect.onclick = async () => {
+      try { await connect(); }
+      catch (e) { logLine("[connect failed] " + e.message); await disconnect(); }
+    };
+
+    $disconnect.onclick = async () => { await disconnect(); };
+
+    $bright.oninput = () => { $brightVal.textContent = String($bright.value); };
+
+    $send.onclick = async () => {
+      try { await sendCurrentFill(); }
+      catch (e) { logLine("[tx failed] " + e.message); }
+    };
+
+    $anim.onclick = async () => {
+      if (!animTimer) startAnim();
+      else stopAnim();
+    };
+
+    window.addEventListener("beforeunload", () => {
+      if (port) {
+        try { stopAnim(); } catch {}
+        try { readAbort?.abort(); } catch {}
+        try { writer?.releaseLock(); } catch {}
+        try { port.close(); } catch {}
+      }
+    });
+
+    // 初期：赤 + 20/255
+    $brightVal.textContent = "20";
+    setStatus(false);
+  </script>
+</body>
+</html>
+
+
